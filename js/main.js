@@ -2,6 +2,7 @@ import { GRAPH_TYPES, buildGraph } from "./graph.js";
 import { STRATEGIES, buildPhi } from "./strategies.js";
 import { createState, step, TERMINATION } from "./dma.js";
 import { createVisualization } from "./visualization.js";
+import { generateTriangularGadgetGraph } from "./triangularGraph.js";
 import { createDashboard } from "./dashboard.js";
 import { renderTransitionEditor, collectDegrees } from "./transitionEditor.js";
 
@@ -23,6 +24,8 @@ const els = {
     play: document.getElementById("btn-play"),
     pause: document.getElementById("btn-pause"),
     reset: document.getElementById("btn-reset"),
+    buildTriangle: document.getElementById("btn-build-triangle"),
+    transitionLog: document.getElementById("transition-log"),
     viz: document.getElementById("visualization"),
 };
 
@@ -33,6 +36,7 @@ let viz = null;
 let state = null;
 let phi = null;
 let playTimer = null;
+let stepCount = 0;
 
 // ----- parameter form helpers -----
 function renderParamInputs(container, defs, prefix) {
@@ -85,7 +89,7 @@ function populateSelectors() {
         opt.value = k; opt.textContent = v.label;
         els.graphType.appendChild(opt);
     }
-    els.graphType.value = "tree";
+    els.graphType.value = "triangle";
 
     for (const [k, v] of Object.entries(STRATEGIES)) {
         const opt = document.createElement("option");
@@ -130,6 +134,10 @@ function buildAndRender() {
     let params;
     try {
         params = readParams(els.graphParams);
+        if (type === 'triangle') {
+            buildTriangleDemo();
+            return;
+        }
         graph = buildGraph(type, params);
     } catch (err) {
         alert(`Could not build graph: ${err.message}`);
@@ -137,9 +145,12 @@ function buildAndRender() {
     }
     if (graph.numNodes === 0) { alert("Empty graph."); return; }
 
-    const start = Number.isFinite(parseInt(els.startNode.value, 10))
+    let start = Number.isFinite(parseInt(els.startNode.value, 10))
         ? parseInt(els.startNode.value, 10)
         : graph.rootId;
+    if (type === "path" && (isNaN(start) || start === 0)) {
+        start = Math.floor((graph.numNodes - 1) / 2);
+    }
     const rootId = (start >= 0 && start < graph.numNodes) ? start : graph.rootId;
     els.startNode.value = rootId;
     els.startNode.max = graph.numNodes - 1;
@@ -148,6 +159,54 @@ function buildAndRender() {
     if (viz) viz.destroy();
     viz = createVisualization(els.viz, graph);
 
+    applyStrategy();
+    resetWalk();
+}
+
+// Render triangular gadget graph for visual demo (no DMA simulation)
+function buildTriangleDemo() {
+    stopPlay();
+    const G = generateTriangularGadgetGraph();
+
+    // Convert G (string ids) into numeric-indexed ported graph for DMA
+    const ids = G.nodes.map(n => n.id);
+    const idToIndex = Object.fromEntries(ids.map((id, i) => [id, i]));
+    const numNodes = ids.length;
+
+    // positions keyed by numeric index
+    const positions = {};
+    for (const n of G.nodes) positions[idToIndex[n.id]] = { x: n.x, y: n.y };
+
+    // build adjacency and ported edges deterministically by encountering links
+    const adj = Array.from({ length: numNodes }, () => []);
+    const portedEdges = [];
+    for (const l of G.links) {
+        const u = idToIndex[l.source];
+        const v = idToIndex[l.target];
+        const portU = adj[u].length;
+        const portV = adj[v].length;
+        adj[u].push({ neighbor: v, port: portU, neighborPort: portV });
+        adj[v].push({ neighbor: u, port: portV, neighborPort: portU });
+        portedEdges.push({ u, v, portU, portV });
+    }
+
+    const nodesArr = Array.from({ length: numNodes }, (_, i) => ({ id: i, hasPebble: false }));
+
+    // Build graph object compatible with simulation code
+    graph = {
+        numNodes,
+        edges: portedEdges,
+        adj,
+        nodes: nodesArr,
+        layoutHint: 'preset',
+        positions,
+        rootId: idToIndex['v'] ?? 0,
+    };
+
+    if (viz) viz.destroy();
+    viz = createVisualization(els.viz, { nodes: nodesArr, edges: portedEdges, positions, rootId: graph.rootId });
+
+    // initialize strategy and simulation state so DMA controls work
     applyStrategy();
     resetWalk();
 }
@@ -166,7 +225,46 @@ function resetWalk() {
         carried: state.carried === Infinity ? "∞" : state.carried,
         placed: 0,
     });
+    clearTransitionLog();
+    appendTransitionLog({
+        node: root,
+        entry: "⊥",
+        degree: graph.adj[root].length,
+        status: "start",
+        action: "Start",
+        exit: "-",
+    });
+    // initialize mini-dashboard
+    const miniNodeEl = document.getElementById('mini-node');
+    const miniActionEl = document.getElementById('mini-action');
+    if (miniNodeEl) miniNodeEl.textContent = String(root);
+    if (miniActionEl) miniActionEl.textContent = 'Start';
     enableControls();
+}
+
+function clearTransitionLog() {
+    if (!els.transitionLog) return;
+    els.transitionLog.innerHTML = "";
+    stepCount = 0;
+}
+
+function appendTransitionLog({ node, entry, degree, status, action, exit }) {
+    if (!els.transitionLog) return;
+    stepCount += 1;
+    const row = document.createElement("tr");
+    row.innerHTML = `
+        <td>${stepCount}</td>
+        <td>${node}</td>
+        <td>${entry}</td>
+        <td>${degree}</td>
+        <td>${status}</td>
+        <td>${action}</td>
+        <td>${exit}</td>
+    `;
+    els.transitionLog.prepend(row);
+    while (els.transitionLog.children.length > 20) {
+        els.transitionLog.removeChild(els.transitionLog.lastElementChild);
+    }
 }
 
 function doStep() {
@@ -185,6 +283,21 @@ function doStep() {
         exit: result.exitPort,
         carried: state.carried === Infinity ? "∞" : state.carried,
         placed,
+    });
+
+    // update mini-dashboard
+    const miniNodeEl = document.getElementById('mini-node');
+    const miniActionEl = document.getElementById('mini-action');
+    if (miniNodeEl) miniNodeEl.textContent = String(state.currentNode);
+    if (miniActionEl) miniActionEl.textContent = result.action ?? '-';
+
+    appendTransitionLog({
+        node: state.currentNode,
+        entry: state.entryPort ?? "⊥",
+        degree: graph.adj[state.currentNode].length,
+        status: result.status,
+        action: result.action ?? "-",
+        exit: result.exitPort ?? "-",
     });
 
     if (result.terminated) {
@@ -225,6 +338,7 @@ function init() {
     els.strategy.addEventListener("change", renderStrategyParams);
     els.applyStrategy.addEventListener("click", applyStrategy);
     els.build.addEventListener("click", buildAndRender);
+    els.buildTriangle.addEventListener("click", buildTriangleDemo);
     els.step.addEventListener("click", doStep);
     els.play.addEventListener("click", startPlay);
     els.pause.addEventListener("click", stopPlay);

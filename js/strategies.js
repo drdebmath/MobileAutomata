@@ -14,6 +14,11 @@ export const STRATEGIES = {
         params: [],
         build: (degrees) => basicWalk(degrees, /*withPebbles=*/ false),
     },
+    memoryless: {
+        label: "Memoryless triangle agent",
+        params: [],
+        build: (degrees) => basicWalk(degrees, false),
+    },
     basicPebble: {
         label: "Basic walk with pebbles",
         params: [],

@@ -67,12 +67,29 @@ const STYLE = [
 export function createVisualization(container, graph) {
     const { nodes, edges, rootId, layoutHint, positions } = graph;
 
+    const sortedNodes = [...nodes].sort((a, b) => {
+        const aNum = Number(a.id);
+        const bNum = Number(b.id);
+        const aIsNum = !Number.isNaN(aNum);
+        const bIsNum = !Number.isNaN(bNum);
+        if (aIsNum && bIsNum) return aNum - bNum;
+        if (aIsNum) return -1;
+        if (bIsNum) return 1;
+        return String(a.id).localeCompare(String(b.id));
+    });
+
+    const sortedEdges = [...edges].sort((a, b) => {
+        if (a.u !== b.u) return a.u - b.u;
+        if (a.v !== b.v) return a.v - b.v;
+        return a.portU - b.portU;
+    });
+
     const elements = [
-        ...nodes.map(n => ({
+        ...sortedNodes.map(n => ({
             data: { id: String(n.id) },
             position: positions && positions[n.id] ? { ...positions[n.id] } : undefined,
         })),
-        ...edges.map((e, i) => ({
+        ...sortedEdges.map((e, i) => ({
             data: {
                 id: `e${i}`,
                 source: String(e.u),

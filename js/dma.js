@@ -24,6 +24,9 @@ export function createState(rootId, rootDegree, pebbleBudget) {
     };
 }
 
+// Agent movement is memoryless: the next port is chosen only from the
+// current node's degree, current entry port, and the node's local pebble status.
+// No history or previous states are consulted when deciding the next move.
 export function step(state, nodes, adj, phi, { termination }) {
     if (state.terminated) {
         return { status: "Terminated", action: "Halt", exitPort: "-", terminated: true };

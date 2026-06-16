@@ -5,6 +5,19 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>DMA Graph Exploration Simulator</title>
     <link rel="stylesheet" href="css/styles.css">
+    <script>
+        // If the page was opened via the file:// protocol (common when using
+        // VS Code Run/Debug), redirect to a local HTTP server if available.
+        // Start a simple server in the workspace root with: `python -m http.server 8000`
+        if (location.protocol === 'file:') {
+            try {
+                // Redirect to localhost:8000 root (serves index.html)
+                window.location.replace('http://localhost:8000/');
+            } catch (e) {
+                // ignore
+            }
+        }
+    </script>
     <script src="https://unpkg.com/cytoscape@3.30.2/dist/cytoscape.min.js" defer></script>
     <script type="module" src="js/main.js" defer></script>
 </head>
@@ -24,6 +37,7 @@
                 <input type="number" id="start-node" value="0" min="0">
             </label>
             <button id="btn-build">Build Graph</button>
+                <button id="btn-build-triangle" class="btn-secondary">Build Triangle Demo</button>
         </section>
 
         <section class="panel">
@@ -77,6 +91,26 @@
             <div class="dashboard-item">Pebbles Placed: <span class="dashboard-value" id="disp-placed">-</span></div>
         </section>
 
+        <section class="panel">
+            <h3>Transition Log</h3>
+            <div class="log-wrapper">
+                <table class="log-table">
+                    <thead>
+                        <tr>
+                            <th>#</th>
+                            <th>Node</th>
+                            <th>Entry</th>
+                            <th>Degree</th>
+                            <th>Status</th>
+                            <th>Action</th>
+                            <th>Exit</th>
+                        </tr>
+                    </thead>
+                    <tbody id="transition-log"></tbody>
+                </table>
+            </div>
+        </section>
+
         <p class="legend">
             DMA reads input <code>(p, d, b)</code> (entry port, degree, e/f) and emits
             <code>(p', a)</code> with <code>a ∈ {abstain, drop, pick}</code>.
@@ -84,6 +118,7 @@
         </p>
     </aside>
 
+    <div id="mini-dashboard" class="mini-dashboard">Current Node: <span id="mini-node">-</span> | Action: <span id="mini-action">-</span></div>
     <main id="visualization"></main>
 </body>
 </html>
