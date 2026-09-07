@@ -113,6 +113,11 @@ kbd{font-family:var(--mono);font-size:11px;border:1px solid var(--rule);border-r
     </section>
 
     <section class="panel" id="panel-rules">
+      <h2>Algorithm</h2>
+      <p class="note">Write the rule as code: a function body receiving the row and returning the action. It is compiled into a table for every row up to the graph’s largest degree, so the engine and the exact game use exactly what you wrote. Rows in the table below still win over it.</p>
+      <div class="row"><label class="small" for="algo-preset">template</label><select id="algo-preset"><option value="">choose…</option><option value="sigma">σ* (readable form)</option><option value="sweep">sweep(c,t,p) with parameters</option><option value="flipsweep4">flipsweep4</option><option value="flipsweep4b">flipsweep4b</option><option value="flipsweep5">flipsweep5</option><option value="flipsweep5d">flipsweep5d</option><option value="eat3">eat3</option><option value="chase3">chase3</option><option value="chase">chase white, else stay</option><option value="blank">blank with the API</option></select><button type="button" id="b-algo-compile" class="primary">Compile and use</button><button type="button" id="b-algo-off">Stop using</button><button type="button" id="b-algo-table" title="Copy the compiled rows into the table below, where each row can be changed">To table</button></div>
+      <textarea id="algo" spellcheck="false" style="min-height:190px" placeholder="if (has(W)) return { paint: 1, target: W };&#10;..."></textarea>
+      <div id="algo-status" class="note"></div>
       <h2>Undefined rows</h2>
       <div class="row"><label for="default" class="small">answered by</label>
         <select id="default">
@@ -128,9 +133,12 @@ kbd{font-family:var(--mono);font-size:11px;border:1px solid var(--rule);border-r
           <option value="chasewhite">chase white, else stay</option>
         </select>
         <span id="sweepparams" hidden>c <select id="sw-c"></select> t <select id="sw-t"></select> p <select id="sw-p"></select></span>
+        <button type="button" id="b-edit-default" title="Load this rule's code into the algorithm editor, compile it, and use it">Edit this rule as code</button>
+        <button type="button" id="b-default-table" title="Write this rule's action for every row up to the graph's largest degree into the table below, where each row can be changed">Edit this rule as table</button>
       </div>
       <p class="note">Rows you define below always win over the default. With “nothing”, the first undefined row the agent reads stops the play and asks you for its action, so a rule can be built while playing.</p>
       <h2>Defined rows <span id="rowcount" class="small"></span></h2>
+      <div class="row"><input type="text" id="rowfilter" class="mono" placeholder="filter rows, e.g. 1. or 2.00" size="18"><span class="note">rows starting with this text; at most 2000 shown</span></div>
       <div class="row"><input type="text" id="newrow" class="mono" placeholder="row, e.g. 1.2010" size="12"> paint <select id="newpaint"></select> target <select id="newtarget"></select> <button type="button" id="b-addrow">Add</button></div>
       <div id="tablewrap"><table id="rules"><thead><tr><th>row</th><th>bag</th><th>paint</th><th>target</th><th></th></tr></thead><tbody></tbody></table></div>
       <h2>Import / export</h2>
@@ -149,7 +157,7 @@ kbd{font-family:var(--mono);font-size:11px;border:1px solid var(--rule);border-r
     </section>
   </aside>
 </main>
-<div class="footer">Rows are <span class="mono">own.bag</span>: the agent’s colour, then one digit per colour counting its neighbours of that colour. Actions are <span class="mono">paint&gt;target</span>. Shortcuts: <kbd>N</kbd> <kbd>E</kbd> <kbd>M</kbd> <kbd>D</kbd> <kbd>S</kbd> modes, <kbd>→</kbd> step, <kbd>A</kbd> auto step, <kbd>Space</kbd> play. Everything is computed in Rust compiled to WebAssembly, no libraries.</div>
+<div class="footer">Rows are <span class="mono">own.bag</span>: the agent’s colour, then one digit per colour counting its neighbours of that colour. Actions are <span class="mono">paint&gt;target</span>. Shortcuts: <kbd>N</kbd> <kbd>E</kbd> <kbd>M</kbd> <kbd>D</kbd> <kbd>S</kbd> modes, <kbd>→</kbd> step, <kbd>A</kbd> auto step, <kbd>Space</kbd> play. Rules can be written as code in the Rules tab; everything else is computed in Rust compiled to WebAssembly, no libraries.</div>
 
 <dialog id="graphdialog" style="border:1px solid var(--rule);border-radius:10px;background:var(--surface);color:var(--ink);max-width:560px;width:90%">
   <h3 style="margin:0 0 8px;font-size:15px">Graph as text</h3>
@@ -216,6 +224,8 @@ const state = {
   k: 5, nodes: [], edges: [], start: 0, mode: 'node', edgeFrom: null, drag: null,
   table: new Map(), // rowText -> {paint, target}
   def: 'none', sweep: [0, 4, 0],
+  algo: null, // {src, table: Map, maxDeg, errors}
+  algoSrc: '',
   play: null, replay: null, timer: null, defining: null,
 };
 const PRESETS = {
@@ -245,7 +255,136 @@ function loadGraphText(text, coords, box) {
 }
 
 // ------------------------------------------------------------ rule table helpers
-function tableText() { return [...state.table.entries()].sort().map(([r, a]) => `${r} ${a.paint}>${a.target === -1 ? 'stay' : a.target}`).join('\n'); }
+function handTableText() { return [...state.table.entries()].sort().map(([r, a]) => `${r} ${a.paint}>${a.target === -1 ? 'stay' : a.target}`).join('\n'); }
+function tableText() {
+  ensureAlgo();
+  const parts = [];
+  if (state.algo) for (const [r, a] of state.algo.table) parts.push(`${r} ${a.paint}>${a.target === -1 ? 'stay' : a.target}`);
+  const hand = handTableText(); if (hand) parts.push(hand);
+  return parts.join('\n');
+}
+function maxDegree() { const d = new Array(state.nodes.length).fill(0); for (const [u, v] of state.edges) { d[u]++; d[v]++; } return Math.max(1, ...d); }
+function forEachRow(k, maxDeg, fn) {
+  const cnt = new Array(k).fill(0);
+  const rec = (c, left, own) => {
+    if (c === k) { if (cnt.reduce((a, b) => a + b, 0) >= 1) fn(own, cnt); return; }
+    for (let x = 0; x <= left; x++) { cnt[c] = x; rec(c + 1, left - x, own); }
+    cnt[c] = 0;
+  };
+  for (let own = 0; own < k; own++) rec(0, maxDeg, own);
+}
+function sweepSource(c, t, p, title) {
+  return `// ${title}: the sweep family sweep(c,t,p).  c = chase mode (what to paint
+// while chasing white), t = target mode, p = paint mode.  Change the three
+// numbers; the meaning of each mode is spelled out below.
+const c = ${c}, t = ${t}, p = ${p};
+const nw = []; for (let x = 1; x < k; x++) if (has(x)) nw.push(x);   // nonwhite colours present
+if (has(W)) {
+  // chase modes: 0-3 paint the constant min(c+1, k-1); 4 paints nxt(own);
+  // 5 paints nxt(smallest nonwhite present); 6 paints nxt(largest nonwhite present)
+  const paint = c <= 3 ? Math.min(c + 1, k - 1) : c === 4 ? nxt(own) : c === 5 ? (nw.length ? nxt(nw[0]) : 1) : (nw.length ? nxt(nw[nw.length - 1]) : 1);
+  return { paint, target: W };
+}
+if (nw.length === 0) return { paint: nxt(own), target: own };
+const mn = nw[0], mx = nw[nw.length - 1], pick = (x) => (has(x) ? x : mn);
+// target modes: 0 smallest, 1 largest, 2 own, 3 nxt(own), 4 prv(own) (each falling back to the smallest)
+const target = t === 0 ? mn : t === 1 ? mx : t === 2 ? pick(own) : t === 3 ? pick(nxt(own)) : pick(prv(own));
+// paint modes: 0 nxt(target), 1 nxt(own), 2 the target colour, 3-6 the constant p-2
+const paint = p === 0 ? nxt(target) : p === 1 ? nxt(own) : p === 2 ? target : Math.min(p - 2, k - 1);
+return { paint, target };`;
+}
+function flipsweep4Source(b) {
+  return `// flipsweep4${b ? 'b' : ''} (k >= 4): S = 1 frontier, F = 2 and G = 3 finished and flipping.
+// Chase white painting S; next to a frontier vertex head for it${b ? ', flipping your own colour' : ''};
+// otherwise sweep finished territory by flipping F/G.
+const S = 1, F = 2, G = 3;
+if (has(W)) return { paint: S, target: W };
+if (own === W || own === S) return has(S) ? { paint: F, target: S } : has(F) ? { paint: G, target: F } : { paint: F, target: has(G) ? G : 'stay' };
+if (own === F) return has(S) ? { paint: ${b ? 'G' : 'F'}, target: S } : has(F) ? { paint: G, target: F } : { paint: G, target: has(G) ? G : 'stay' };
+return has(S) ? { paint: ${b ? 'F' : 'G'}, target: S } : has(G) ? { paint: F, target: G } : { paint: F, target: has(F) ? F : 'stay' };`;
+}
+const ALGO_TEMPLATES = {
+  blank: `// The row: own (your colour, 0 = white), bag (an array: bag[c] = how many
+// neighbours carry colour c), k (number of colours), deg (number of neighbours).
+// Helpers: W = 0, has(c) (is colour c in the bag?), nxt(c) and prv(c) (the
+// nonwhite cycle 1 -> 2 -> ... -> k-1 -> 1).
+// Return { paint: colour, target: colour } or { paint: colour, target: 'stay' }.
+if (has(W)) return { paint: 1, target: W };
+return { paint: own, target: 'stay' };`,
+  sigma: `// sigma* = sweep(c0,t4,p0): chase white painting 1; otherwise target the
+// colour before your own in the cycle 1 -> 2 -> ... -> k-1 -> 1 (the smallest
+// colour present if that one is absent) and paint the colour after the target.
+if (has(W)) return { paint: 1, target: W };
+let t = prv(own);
+if (!has(t)) { t = 1; while (!has(t)) t++; }
+return { paint: nxt(t), target: t };`,
+  sweep: sweepSource(0, 4, 0, 'sweep(c0,t4,p0) = sigma*'),
+  flipsweep4: flipsweep4Source(false),
+  flipsweep4b: flipsweep4Source(true),
+  flipsweep5: `// flipsweep5 (k = 5): S = 1 frontier, F = 2 and G = 3 finished and flipping,
+// P = 4 pending: a vertex left toward white while another white neighbour
+// remained.  P is sought before S.
+const S = 1, F = 2, G = 3, P = 4;
+if (has(W)) return { paint: bag[W] >= 2 ? P : S, target: W };
+if (own === F) return has(P) ? { paint: F, target: P } : has(S) ? { paint: F, target: S } : has(F) ? { paint: G, target: F } : { paint: G, target: has(G) ? G : 'stay' };
+if (own === G) return has(P) ? { paint: G, target: P } : has(S) ? { paint: G, target: S } : has(G) ? { paint: F, target: G } : { paint: F, target: has(F) ? F : 'stay' };
+return has(P) ? { paint: F, target: P } : has(S) ? { paint: F, target: S } : has(F) ? { paint: G, target: F } : { paint: F, target: has(G) ? G : 'stay' };`,
+  flipsweep5d: `// flipsweep5d (k = 5): S = 1 frontier, F = 2 and G = 3 finished and flipping,
+// D = 4 dead end.  Chase white painting S; a finished leaf becomes D; otherwise
+// head for a frontier neighbour, else sweep finished territory by flipping F/G.
+const S = 1, F = 2, G = 3, D = 4;
+if (has(W)) return { paint: S, target: W };
+if (deg === 1) { for (let c = 0; c < k; c++) if (has(c)) return { paint: D, target: c }; }
+if (own === F) return has(S) ? { paint: F, target: S } : has(F) ? { paint: G, target: F } : { paint: G, target: has(G) ? G : 'stay' };
+if (own === G) return has(S) ? { paint: G, target: S } : has(G) ? { paint: F, target: G } : { paint: F, target: has(F) ? F : 'stay' };
+return has(S) ? { paint: F, target: S } : has(F) ? { paint: G, target: F } : { paint: F, target: has(G) ? G : 'stay' };`,
+  eat3: `// eat3 (k = 3): colours a = 1, b = 2.  Chase white painting a; otherwise
+// paint b and target a; without a, flip: from a paint b and target b, from b
+// paint a and target b.  The trail-eating walk.
+const A = 1, B = 2;
+if (has(W)) return { paint: A, target: W };
+if (own === W || own === A) return has(A) ? { paint: B, target: A } : { paint: B, target: has(B) ? B : 'stay' };
+return has(A) ? { paint: B, target: A } : { paint: A, target: has(B) ? B : 'stay' };`,
+  chase3: `// chase3 (k = 3): S = 1 frontier, F = 2 finished.  Chase white painting S;
+// otherwise paint F and head for S, else for F.  No sweep.
+const S = 1, F = 2;
+if (has(W)) return { paint: S, target: W };
+return has(S) ? { paint: F, target: S } : { paint: F, target: has(F) ? F : 'stay' };`,
+  chase: `// chase white painting your own colour; with no white neighbour, stay
+if (has(W)) return { paint: own, target: W };
+return { paint: own, target: 'stay' };`,
+};
+function defaultAsSource() {
+  // the code of the rule chosen in "answered by", sweep parameters included
+  if (state.def === 'sweep') return sweepSource(state.sweep[0], state.sweep[1], state.sweep[2], `sweep(c${state.sweep[0]},t${state.sweep[1]},p${state.sweep[2]})`);
+  if (state.def === 'sigma') return sweepSource(0, 4, 0, 'sweep(c0,t4,p0) = sigma*');
+  if (state.def === 'chasewhite') return ALGO_TEMPLATES.chase;
+  return ALGO_TEMPLATES[state.def] || ALGO_TEMPLATES.blank;
+}
+function compileAlgo(src, k, maxDeg) {
+  const f = new Function('own', 'bag', 'k', 'deg', 'has', 'nxt', 'prv', 'W', src); // throws on a syntax error
+  const table = new Map(), errors = [];
+  const nxt = (c) => (c === 0 ? 1 : (c % (k - 1)) + 1), prv = (c) => (c <= 1 ? k - 1 : c - 1);
+  forEachRow(k, maxDeg, (own, cnt) => {
+    const rowText = own + '.' + cnt.map((x) => x.toString(16)).join('');
+    const bag = cnt.slice(), has = (c) => Number.isInteger(c) && c >= 0 && c < k && bag[c] > 0, deg = bag.reduce((a, b) => a + b, 0);
+    let out;
+    try { out = f(own, bag, k, deg, has, nxt, prv, 0); } catch (e) { if (errors.length < 5) errors.push(`${rowText}: ${e.message}`); return; }
+    let paint, target;
+    if (Array.isArray(out)) [paint, target] = out; else if (out && typeof out === 'object') ({ paint, target } = out); else { if (errors.length < 5) errors.push(`${rowText}: returned ${JSON.stringify(out)}, expected { paint, target }`); return; }
+    if (target === 'stay' || target === undefined || target === null) target = -1;
+    if (!(Number.isInteger(paint) && paint >= 0 && paint < k) || !(target === -1 || (Number.isInteger(target) && target >= 0 && target < k))) { if (errors.length < 5) errors.push(`${rowText}: paint ${paint}, target ${target} are not colours below ${k}`); return; }
+    table.set(rowText, { paint, target });
+  });
+  return { src, table, maxDeg, k, errors };
+}
+function ensureAlgo() {
+  // recompile when the palette or the graph's largest degree changed
+  if (!state.algoSrc) { state.algo = null; return; }
+  const d = maxDegree();
+  if (state.algo && state.algo.k === state.k && state.algo.maxDeg >= d && state.algo.src === state.algoSrc) return;
+  try { state.algo = compileAlgo(state.algoSrc, state.k, d); } catch (e) { state.algo = null; state.algoError = e.message; }
+}
 function parseTableText(text) {
   const m = new Map();
   for (let line of text.split('\n')) { line = line.split('#')[0].trim(); if (!line) continue; const [r, a] = line.split(/\s+/); if (!r || !a) throw new Error('bad line: ' + line); const [p, t] = a.split('>'); if (!/^\d+\.[0-9a-f]+$/.test(r) || p === undefined || t === undefined) throw new Error('bad line: ' + line); m.set(r, { paint: +p, target: t === 'stay' || t === 's' ? -1 : +t }); }
@@ -265,9 +404,9 @@ function bagChips(rowText) {
 }
 
 // ------------------------------------------------------------ persistence (per-browser convenience only)
-function save() { try { localStorage.setItem('cew.state', JSON.stringify({ k: state.k, nodes: state.nodes, edges: state.edges, start: state.start, table: [...state.table.entries()], def: state.def, sweep: state.sweep })); } catch (e) { /* storage unavailable */ } }
+function save() { try { localStorage.setItem('cew.state', JSON.stringify({ k: state.k, nodes: state.nodes, edges: state.edges, start: state.start, table: [...state.table.entries()], def: state.def, sweep: state.sweep, algoSrc: state.algoSrc })); } catch (e) { /* storage unavailable */ } }
 function restore() {
-  try { const s = JSON.parse(localStorage.getItem('cew.state') || 'null'); if (!s || !s.nodes || !s.nodes.length) return false; state.k = s.k || 5; state.nodes = s.nodes; state.edges = s.edges || []; state.start = s.start || 0; state.table = new Map(s.table || []); state.def = s.def || 'none'; state.sweep = s.sweep || [0, 4, 0]; return true; } catch (e) { return false; }
+  try { const s = JSON.parse(localStorage.getItem('cew.state') || 'null'); if (!s || !s.nodes || !s.nodes.length) return false; state.k = s.k || 5; state.nodes = s.nodes; state.edges = s.edges || []; state.start = s.start || 0; state.table = new Map(s.table || []); state.def = s.def || 'none'; state.sweep = s.sweep || [0, 4, 0]; state.algoSrc = s.algoSrc || ''; return true; } catch (e) { return false; }
 }
 
 // ------------------------------------------------------------ play
@@ -289,7 +428,8 @@ function computePending() {
   const r = engine(requestText('step', { colours: p.colours.join(' '), cur: p.cur, vis: [...p.vis].join(' ') }));
   if (r.status !== 'ok') { p.done = { kind: 'error', message: r.message }; return; }
   if (!r.defined) { p.pending = null; state.defining = { row: r.row, degree: r.degree }; return; }
-  p.pending = { row: r.row, paint: r.paint, target: r.target, options: r.options, auto: r.auto, source: r.source };
+  const source = state.table.has(r.row) ? 'table' : state.algo && state.algo.table.has(r.row) ? 'algorithm' : r.source;
+  p.pending = { row: r.row, paint: r.paint, target: r.target, options: r.options, auto: r.auto, source };
 }
 function applyChoice(choice) {
   const p = state.play, pd = p.pending; if (!pd) return;
@@ -398,12 +538,23 @@ function renderPlay() {
 }
 function colourOptions(withStay) { let s = ''; for (let c = 0; c < state.k; c++) s += `<option value="${c}">${c === 0 ? '0 white' : c}</option>`; if (withStay) s += '<option value="-1">stay</option>'; return s; }
 function renderRules() {
+  ensureAlgo();
+  const ta = $('#algo'); if (document.activeElement !== ta && ta.value !== state.algoSrc) ta.value = state.algoSrc;
+  const st = $('#algo-status');
+  if (!state.algoSrc) st.innerHTML = 'No algorithm in use; undefined rows are answered by the choice below.';
+  else if (!state.algo) st.innerHTML = `<span style="color:var(--bad)">Does not compile: ${state.algoError || 'unknown error'}</span>`;
+  else st.innerHTML = `<span style="color:${state.algo.errors.length ? 'var(--warn)' : 'var(--good)'}">In use: ${state.algo.table.size.toLocaleString()} rows compiled for ${state.k} colours up to degree ${state.algo.maxDeg}${state.algo.errors.length ? `; ${state.algo.errors.length} rows rejected, e.g. ${state.algo.errors[0]}` : ''}.</span> Rows it does not cover fall to the choice below.`;
   $('#default').value = state.def; $('#sweepparams').hidden = state.def !== 'sweep';
   ['sw-c', 'sw-t', 'sw-p'].forEach((id, j) => { const sel = $('#' + id); const max = j === 1 ? 4 : 6; if (sel.options.length !== max + 1) { sel.innerHTML = [...Array(max + 1).keys()].map((v) => `<option>${v}</option>`).join(''); } sel.value = state.sweep[j]; });
   $('#newpaint').innerHTML = colourOptions(false); $('#newtarget').innerHTML = colourOptions(true);
   $('#rowcount').textContent = state.table.size ? `(${state.table.size})` : '';
   const tb = $('#rules tbody');
-  tb.innerHTML = [...state.table.entries()].sort().map(([r, a]) => `<tr data-row="${r}"><td class="mono">${r}</td><td>${bagChips(r)}</td><td><select class="e-paint">${colourOptions(false)}</select></td><td><select class="e-target">${colourOptions(true)}</select></td><td><button type="button" class="e-del" title="remove">✕</button></td></tr>`).join('') || '<tr><td colspan="5" class="note">No rows yet. Define rows while playing, add them here, or paste a table below.</td></tr>';
+  const filter = ($('#rowfilter').value || '').trim();
+  const all = [...state.table.entries()].sort().filter(([r]) => r.startsWith(filter));
+  const shown = all.slice(0, 2000);
+  tb.innerHTML = shown.map(([r, a]) => `<tr data-row="${r}"><td class="mono">${r}</td><td>${bagChips(r)}</td><td><select class="e-paint">${colourOptions(false)}</select></td><td><select class="e-target">${colourOptions(true)}</select></td><td><button type="button" class="e-del" title="remove">✕</button></td></tr>`).join('')
+    + (all.length > shown.length ? `<tr><td colspan="5" class="note">${all.length - shown.length} more rows match; narrow the filter to see them.</td></tr>` : '')
+    || '<tr><td colspan="5" class="note">No rows yet. Define rows while playing, add them here, paste a table below, or turn a rule into rows with “Edit this rule as table”.</td></tr>';
   tb.querySelectorAll('tr[data-row]').forEach((tr) => {
     const r = tr.dataset.row, a = state.table.get(r); tr.querySelector('.e-paint').value = a.paint; tr.querySelector('.e-target').value = a.target;
     tr.querySelector('.e-paint').addEventListener('change', (e) => { state.table.set(r, { paint: +e.target.value, target: state.table.get(r).target }); save(); resetPlay(); render(); });
@@ -485,6 +636,26 @@ $('#b-addrow').addEventListener('click', () => { const r = $('#newrow').value.tr
 $('#b-table-import').addEventListener('click', () => { try { state.table = parseTableText($('#tabletext').value); save(); resetPlay(); render(); } catch (err) { alert(err.message); } });
 $('#b-table-export').addEventListener('click', () => { $('#tabletext').value = `# cegis rule k=${state.k} rows=${state.table.size}\n` + tableText(); });
 $('#b-table-clear').addEventListener('click', () => { state.table = new Map(); save(); resetPlay(); render(); });
+$('#algo-preset').addEventListener('change', (e) => { const v = e.target.value; e.target.value = ''; if (v) { $('#algo').value = ALGO_TEMPLATES[v]; } });
+$('#b-algo-compile').addEventListener('click', () => { state.algoSrc = $('#algo').value; state.algo = null; state.algoError = null; ensureAlgo(); save(); resetPlay(); render(); switchTab('rules'); });
+$('#b-algo-off').addEventListener('click', () => { state.algoSrc = ''; state.algo = null; save(); resetPlay(); render(); });
+function materialise(map, what) {
+  if (!map.size) { alert('The rule produced no rows.'); return; }
+  if (state.table.size && !confirm(`Replace the ${state.table.size} defined rows with the ${map.size} rows of ${what}?`)) return;
+  state.table = new Map(map); save(); resetPlay(); render(); switchTab('rules');
+}
+$('#rowfilter').addEventListener('input', () => renderRules());
+$('#b-default-table').addEventListener('click', () => {
+  if (state.def === 'none') { alert('Choose a rule in "answered by" first.'); return; }
+  let comp; try { comp = compileAlgo(defaultAsSource(), state.k, maxDegree()); } catch (e) { alert(e.message); return; }
+  materialise(comp.table, `${$('#default').selectedOptions[0].textContent.trim()} (${state.k} colours, degree up to ${maxDegree()})`);
+});
+$('#b-algo-table').addEventListener('click', () => { ensureAlgo(); if (!state.algo) { alert('Compile an algorithm first.'); return; } materialise(state.algo.table, `the compiled algorithm (${state.k} colours, degree up to ${state.algo.maxDeg})`); });
+$('#b-edit-default').addEventListener('click', () => {
+  if (state.def === 'none') { alert('Choose a rule in "answered by" first, or pick a template above.'); return; }
+  state.algoSrc = defaultAsSource(); state.algo = null; state.algoError = null; ensureAlgo(); save(); resetPlay(); render();
+  const ta = $('#algo'); ta.scrollIntoView({ block: 'center' }); ta.focus();
+});
 $('#b-reset').addEventListener('click', () => { resetPlay(); render(); });
 $('#b-step').addEventListener('click', () => { stopPlay(); stepOnce(false); render(); });
 $('#b-auto').addEventListener('click', () => { stopPlay(); stepOnce(true); render(); });

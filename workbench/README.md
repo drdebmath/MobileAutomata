@@ -29,6 +29,15 @@ the engine (base64) so it opens from a `file://` URL.  `site/index.html` +
   so a rule can be written while playing), σ* or any `sweep(c,t,p)`, the
   flip-sweeps, `eat3`, `chase3`, or chase-white-else-stay.  Rows in the table
   always win over the default.
+* **Algorithm editor.** A rule can be written as code: a JavaScript function
+  body over the row (`own`, `bag`, `k`, `deg`, helpers `has`, `nxt`, `prv`, `W`)
+  returning `{ paint, target }`.  *Compile and use* evaluates it on every row up
+  to the graph's largest degree and hands the resulting table to the engine, so
+  the exact game analyses exactly the code written.  Every built-in rule has a
+  template (*Edit this rule as code*) and can also be written into the editable
+  row table (*Edit this rule as table*, *To table*); the templates agree with
+  the engine's formulas on every row up to degree 6.  Precedence: table rows,
+  then the algorithm, then the fallback.
 * **Play.** Step by step: the page shows the row read, the action, and the
   neighbours the adversary may serve; when there are several you click the one
   the agent reaches (or *Auto step*, which serves a visited vertex farthest
