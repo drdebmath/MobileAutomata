@@ -1,0 +1,17 @@
+[package]
+name = "game-wasm"
+version = "0.1.0"
+edition = "2021"
+description = "The colour-exploration game for the browser: rules, adversary, exact game.  No dependencies; plain C-ABI exports for wasm32-unknown-unknown."
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

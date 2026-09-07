@@ -1,0 +1,512 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Colour Exploration Workbench</title>
+<style>
+:root{
+  --paper:#f6f5fa; --surface:#ffffff; --ink:#241f45; --soft:#6a6389; --rule:#d9d5e8; --pen:#4f3a9e; --pen-soft:#ebe6fb;
+  --good:#1f7a55; --good-bg:#e3f3eb; --bad:#b42b2b; --bad-bg:#f9e4e4; --warn:#8a6400; --warn-bg:#f7efd6;
+  --c0:#ffffff; --c1:#f4b63e; --c2:#2faf9b; --c3:#e04e67; --c4:#3d74e6; --c5:#8e5ad6;
+  --mono:ui-monospace,Menlo,Consolas,monospace; --body:system-ui,-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+}
+@media (prefers-color-scheme: dark){:root{
+  --paper:#141126; --surface:#1c1833; --ink:#ece9f7; --soft:#a9a2c6; --rule:#372f5a; --pen:#b39dff; --pen-soft:#2a2350;
+  --good:#5bcb92; --good-bg:#173226; --bad:#f07070; --bad-bg:#3a1c22; --warn:#e3b341; --warn-bg:#3a3016;
+}}
+*{box-sizing:border-box}
+html,body{height:100%}
+body{margin:0;background:var(--paper);color:var(--ink);font-family:var(--body);font-size:14px;line-height:1.4;display:flex;flex-direction:column}
+header{display:flex;flex-wrap:wrap;align-items:center;gap:10px 18px;padding:10px 16px;border-bottom:1px solid var(--rule);background:var(--surface)}
+header h1{font-size:17px;margin:0 12px 0 0;font-weight:600;letter-spacing:.01em}
+.group{display:flex;align-items:center;gap:6px}
+.group label{color:var(--soft);font-size:12.5px}
+button,select,input[type=text],input[type=number],textarea{font:inherit;color:var(--ink);background:var(--surface);border:1px solid var(--rule);border-radius:7px;padding:6px 9px}
+button{cursor:pointer}
+button:hover{background:var(--pen-soft)}
+button[aria-pressed="true"],button.primary{background:var(--pen);border-color:var(--pen);color:#fff}
+button:disabled{opacity:.45;cursor:default}
+button:focus-visible,select:focus-visible,input:focus-visible{outline:2px solid var(--pen);outline-offset:2px}
+main{flex:1;display:grid;grid-template-columns:minmax(0,1fr) 400px;gap:0;min-height:0}
+@media (max-width:980px){main{grid-template-columns:1fr}}
+#stage{position:relative;background:var(--paper);min-height:420px}
+#stage svg{width:100%;height:100%;display:block;touch-action:none}
+#hint{position:absolute;left:12px;bottom:10px;font-size:12.5px;color:var(--soft);background:var(--surface);border:1px solid var(--rule);border-radius:7px;padding:5px 9px;max-width:70%}
+#legend{position:absolute;right:12px;top:10px;display:flex;gap:8px;flex-wrap:wrap;font-size:12px;background:var(--surface);border:1px solid var(--rule);border-radius:7px;padding:5px 9px}
+.sw{display:inline-block;width:12px;height:12px;border-radius:50%;border:1.5px solid var(--ink);vertical-align:-2px;margin-right:3px}
+aside{border-left:1px solid var(--rule);background:var(--surface);display:flex;flex-direction:column;min-height:0}
+@media (max-width:980px){aside{border-left:0;border-top:1px solid var(--rule)}}
+.tabs{display:flex;border-bottom:1px solid var(--rule)}
+.tabs button{flex:1;border:0;border-radius:0;background:transparent;padding:10px 6px;font-weight:600;color:var(--soft)}
+.tabs button[aria-selected="true"]{color:var(--pen);box-shadow:inset 0 -2px 0 var(--pen);background:transparent}
+.panel{display:none;padding:12px 14px;overflow:auto;flex:1}
+.panel.active{display:block}
+.panel h2{font-size:12px;letter-spacing:.08em;text-transform:uppercase;color:var(--soft);margin:14px 0 6px}
+.panel h2:first-child{margin-top:0}
+.row{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin:6px 0}
+.mono{font-family:var(--mono);font-size:12.5px}
+.note{color:var(--soft);font-size:12.5px;margin:4px 0}
+.banner{border-radius:8px;padding:8px 10px;margin:8px 0;font-size:13px}
+.banner.good{background:var(--good-bg);color:var(--good)}
+.banner.bad{background:var(--bad-bg);color:var(--bad)}
+.banner.warn{background:var(--warn-bg);color:var(--warn)}
+.banner.neutral{background:var(--pen-soft);color:var(--ink)}
+table{border-collapse:collapse;width:100%;font-size:12.5px}
+th{text-align:left;color:var(--soft);font-weight:600;font-size:11px;letter-spacing:.06em;text-transform:uppercase;padding:5px 6px;border-bottom:1px solid var(--rule)}
+td{padding:4px 6px;border-bottom:1px solid var(--rule);vertical-align:middle;white-space:nowrap}
+tr.cur td{background:var(--pen-soft)}
+tr.cycle td:first-child{box-shadow:inset 3px 0 0 var(--bad)}
+td select{padding:2px 4px}
+textarea{width:100%;min-height:90px;font-family:var(--mono);font-size:12px}
+.chips i{display:inline-block;width:11px;height:11px;border-radius:50%;border:1px solid var(--ink);margin-right:1px;vertical-align:-1px}
+#ledgerwrap{max-height:260px;overflow:auto;border:1px solid var(--rule);border-radius:8px}
+.small{font-size:12px}
+.node.option{cursor:pointer}
+.node.option .halo{animation:pulse 1.1s ease-in-out infinite}
+@keyframes pulse{0%,100%{opacity:.35}50%{opacity:.85}}
+@media (prefers-reduced-motion:reduce){.node.option .halo{animation:none;opacity:.7}}
+.footer{padding:8px 16px;border-top:1px solid var(--rule);color:var(--soft);font-size:12px;background:var(--surface)}
+kbd{font-family:var(--mono);font-size:11px;border:1px solid var(--rule);border-radius:4px;padding:0 4px}
+</style>
+</head>
+<body>
+<header>
+  <h1>Colour Exploration Workbench</h1>
+  <div class="group" role="group" aria-label="Drawing mode">
+    <button type="button" data-mode="node" aria-pressed="true" title="Click empty space to add a vertex (N)">Add vertex</button>
+    <button type="button" data-mode="edge" aria-pressed="false" title="Click two vertices to join them (E)">Add edge</button>
+    <button type="button" data-mode="move" aria-pressed="false" title="Drag vertices (M)">Move</button>
+    <button type="button" data-mode="delete" aria-pressed="false" title="Click a vertex or an edge to remove it (D)">Delete</button>
+    <button type="button" data-mode="start" aria-pressed="false" title="Click a vertex to make it the start (S)">Set start</button>
+  </div>
+  <div class="group"><label for="k">colours</label><select id="k"><option>2</option><option>3</option><option>4</option><option selected>5</option><option>6</option></select></div>
+  <div class="group"><label for="preset">preset</label><select id="preset"><option value="">choose…</option><option value="sketch1">Sketch I (17)</option><option value="sketch2">Sketch II (14)</option><option value="paw">paw + pendant (k=2 killer)</option><option value="c4p">C4 with two pendants</option><option value="ladder4">ladder L4 with corner pendants</option><option value="clear">empty canvas</option></select></div>
+  <div class="group"><button type="button" id="b-import-graph">Import / export graph</button></div>
+  <div class="group small" id="wasm-status">loading engine…</div>
+</header>
+
+<main>
+  <div id="stage">
+    <svg id="svg" viewBox="0 0 1000 640" role="img" aria-label="graph canvas"></svg>
+    <div id="legend"></div>
+    <div id="hint">Click on empty space to add a vertex.</div>
+  </div>
+  <aside>
+    <div class="tabs" role="tablist">
+      <button type="button" role="tab" data-tab="play" aria-selected="true">Play</button>
+      <button type="button" role="tab" data-tab="rules" aria-selected="false">Rules</button>
+      <button type="button" role="tab" data-tab="analysis" aria-selected="false">Analysis</button>
+    </div>
+
+    <section class="panel active" id="panel-play">
+      <div class="row">
+        <button type="button" id="b-reset" title="Back to the start position">⟲ Reset</button>
+        <button type="button" id="b-step" class="primary" title="One step; you choose when several neighbours carry the target colour">Step</button>
+        <button type="button" id="b-auto" title="One step, the automatic adversary choosing">Auto step</button>
+        <button type="button" id="b-play" title="Keep auto-stepping">▶ Play</button>
+        <label class="small" for="speed">speed</label><input type="range" id="speed" min="1" max="10" value="5" style="width:80px">
+      </div>
+      <div id="playstatus"></div>
+      <h2>Ledger</h2>
+      <div id="ledgerwrap"><table id="ledger"><thead><tr><th>#</th><th>at</th><th>reads</th><th>does</th><th>may serve</th><th>served</th></tr></thead><tbody></tbody></table></div>
+    </section>
+
+    <section class="panel" id="panel-rules">
+      <h2>Undefined rows</h2>
+      <div class="row"><label for="default" class="small">answered by</label>
+        <select id="default">
+          <option value="none">nothing (ask me)</option>
+          <option value="sigma">σ* = sweep(c0,t4,p0)</option>
+          <option value="sweep">sweep(c,t,p)…</option>
+          <option value="flipsweep4">flipsweep4 (k≥4)</option>
+          <option value="flipsweep4b">flipsweep4b (k≥4)</option>
+          <option value="flipsweep5">flipsweep5 (k≥5)</option>
+          <option value="flipsweep5d">flipsweep5d (k≥5)</option>
+          <option value="eat3">eat3 (k≥3)</option>
+          <option value="chase3">chase3 (k≥3)</option>
+          <option value="chasewhite">chase white, else stay</option>
+        </select>
+        <span id="sweepparams" hidden>c <select id="sw-c"></select> t <select id="sw-t"></select> p <select id="sw-p"></select></span>
+      </div>
+      <p class="note">Rows you define below always win over the default. With “nothing”, the first undefined row the agent reads stops the play and asks you for its action, so a rule can be built while playing.</p>
+      <h2>Defined rows <span id="rowcount" class="small"></span></h2>
+      <div class="row"><input type="text" id="newrow" class="mono" placeholder="row, e.g. 1.2010" size="12"> paint <select id="newpaint"></select> target <select id="newtarget"></select> <button type="button" id="b-addrow">Add</button></div>
+      <div id="tablewrap"><table id="rules"><thead><tr><th>row</th><th>bag</th><th>paint</th><th>target</th><th></th></tr></thead><tbody></tbody></table></div>
+      <h2>Import / export</h2>
+      <p class="note">One <span class="mono">row paint&gt;target</span> per line, the engine’s <span class="mono">rule_final.txt</span> format; lines starting with <span class="mono">#</span> are ignored.</p>
+      <textarea id="tabletext" spellcheck="false"></textarea>
+      <div class="row"><button type="button" id="b-table-import">Replace table with text</button><button type="button" id="b-table-export">Text from table</button><button type="button" id="b-table-clear">Clear table</button></div>
+    </section>
+
+    <section class="panel" id="panel-analysis">
+      <h2>All adversarial executions</h2>
+      <p class="note">The exact game enumerates every position the adversary can reach under the rule. “Explores” means no adversarial execution leaves a vertex unvisited; “fails” comes with one trapping execution you can replay.</p>
+      <div class="row"><label class="small" for="cap">position cap</label><input type="number" id="cap" value="1000000" min="1000" max="12000000" step="100000" style="width:120px"><button type="button" id="b-exact" class="primary">Search all executions</button><button type="button" id="b-cancel" disabled>Cancel</button></div>
+      <h2>Quick adversary walks</h2>
+      <div class="row"><label class="small" for="walks">random walks</label><input type="number" id="walks" value="64" min="0" max="100000" style="width:90px"><button type="button" id="b-walks">Run walks</button></div>
+      <div id="analysis"></div>
+    </section>
+  </aside>
+</main>
+<div class="footer">Rows are <span class="mono">own.bag</span>: the agent’s colour, then one digit per colour counting its neighbours of that colour. Actions are <span class="mono">paint&gt;target</span>. Shortcuts: <kbd>N</kbd> <kbd>E</kbd> <kbd>M</kbd> <kbd>D</kbd> <kbd>S</kbd> modes, <kbd>→</kbd> step, <kbd>A</kbd> auto step, <kbd>Space</kbd> play. Everything is computed in Rust compiled to WebAssembly, no libraries.</div>
+
+<dialog id="graphdialog" style="border:1px solid var(--rule);border-radius:10px;background:var(--surface);color:var(--ink);max-width:560px;width:90%">
+  <h3 style="margin:0 0 8px;font-size:15px">Graph as text</h3>
+  <p class="note">Format <span class="mono">n start u-v,u-v,…</span> with vertices <span class="mono">0…n−1</span>. Imported vertices are laid out on a circle; drag them afterwards.</p>
+  <textarea id="graphtext" spellcheck="false" style="min-height:70px"></textarea>
+  <div class="row" style="justify-content:flex-end"><button type="button" id="b-graph-close">Close</button><button type="button" id="b-graph-apply" class="primary">Import</button></div>
+</dialog>
+
+<script>
+const WASM_B64 = null; /* build.sh inlines the engine here for the standalone page */
+(async function () {
+'use strict';
+const $ = (s) => document.querySelector(s);
+const PAL = ['var(--c0)', 'var(--c1)', 'var(--c2)', 'var(--c3)', 'var(--c4)', 'var(--c5)'];
+const CNAME = ['white', 'colour 1', 'colour 2', 'colour 3', 'colour 4', 'colour 5'];
+
+// ------------------------------------------------------------ engine (wasm)
+function b64ToBytes(b64) { const bin = atob(b64); const out = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i); return out.buffer; }
+async function wasmBytes() {
+  if (WASM_B64) return b64ToBytes(WASM_B64);
+  const res = await fetch('game.wasm'); if (!res.ok) throw new Error('game.wasm not found next to this page'); return await res.arrayBuffer();
+}
+function makeCaller(exports) {
+  const enc = new TextEncoder(), dec = new TextDecoder();
+  return (text) => {
+    const bytes = enc.encode(text);
+    const ptr = exports.alloc(bytes.length);
+    new Uint8Array(exports.memory.buffer, ptr, bytes.length).set(bytes);
+    const out = exports.run(ptr, bytes.length);
+    const n = new DataView(exports.memory.buffer).getUint32(out, true);
+    const s = dec.decode(new Uint8Array(exports.memory.buffer, out + 4, n));
+    exports.free_result(out); exports.dealloc(ptr, bytes.length);
+    return JSON.parse(s);
+  };
+}
+let engine = null, bytes = null;
+try {
+  bytes = await wasmBytes();
+  const { instance } = await WebAssembly.instantiate(bytes, {});
+  engine = makeCaller(instance.exports);
+  $('#wasm-status').textContent = `engine ready (${(bytes.byteLength / 1024).toFixed(0)} KB of WebAssembly)`;
+} catch (e) { $('#wasm-status').textContent = 'engine failed to load: ' + e.message; }
+
+// the exact game runs in a worker so the page stays responsive and can cancel
+const workerSrc = `
+let call = null;
+function makeCaller(exports){ const enc=new TextEncoder(), dec=new TextDecoder(); return (text)=>{ const b=enc.encode(text); const p=exports.alloc(b.length); new Uint8Array(exports.memory.buffer,p,b.length).set(b); const o=exports.run(p,b.length); const n=new DataView(exports.memory.buffer).getUint32(o,true); const s=dec.decode(new Uint8Array(exports.memory.buffer,o+4,n)); exports.free_result(o); exports.dealloc(p,b.length); return s; }; }
+onmessage = async (e) => { const m = e.data;
+  if (m.type === 'init') { const { instance } = await WebAssembly.instantiate(m.bytes, {}); call = makeCaller(instance.exports); postMessage({ type: 'ready' }); return; }
+  if (m.type === 'run') { let text; try { text = call(m.text); } catch (err) { text = JSON.stringify({ status: 'error', message: 'engine trap: ' + err.message + ' (lower the cap)' }); } postMessage({ type: 'result', id: m.id, text }); }
+};`;
+let worker = null, workerReady = null, jobId = 0, pending = new Map();
+function startWorker() {
+  if (worker) worker.terminate();
+  worker = new Worker(URL.createObjectURL(new Blob([workerSrc], { type: 'text/javascript' })));
+  workerReady = new Promise((res) => { worker.onmessage = (e) => { if (e.data.type === 'ready') res(); else if (e.data.type === 'result') { const cb = pending.get(e.data.id); pending.delete(e.data.id); if (cb) cb(JSON.parse(e.data.text)); } }; });
+  worker.postMessage({ type: 'init', bytes: bytes.slice(0) });
+}
+if (bytes) startWorker();
+function runInWorker(text) { return new Promise(async (res) => { await workerReady; const id = ++jobId; pending.set(id, res); worker.postMessage({ type: 'run', id, text }); }); }
+
+// ------------------------------------------------------------ state
+const state = {
+  k: 5, nodes: [], edges: [], start: 0, mode: 'node', edgeFrom: null, drag: null,
+  table: new Map(), // rowText -> {paint, target}
+  def: 'none', sweep: [0, 4, 0],
+  play: null, replay: null, timer: null, defining: null,
+};
+const PRESETS = {
+  sketch1: { text: '17 0 0-1,1-2,0-2,0-3,2-3,0-4,4-5,3-6,4-6,5-6,5-7,6-8,7-8,5-9,9-14,9-15,9-10,10-16,5-10,9-11,10-11,5-11,7-11,11-12,11-13,12-13', k: 5,
+    coords: [[478,462],[160,462],[183,712],[490,700],[735,462],[948,462],[742,685],[955,680],[860,830],[955,245],[1235,245],[1235,462],[1490,415],[1480,565],[935,90],[775,245],[1240,95]], box: [1600, 1030] },
+  sketch2: { text: '14 0 0-1,1-2,2-3,0-3,0-2,0-4,3-5,4-5,3-4,4-6,4-8,5-8,6-7,6-11,6-13,7-12,7-8,6-8,4-7,8-9,8-10,9-10', k: 5,
+    coords: [[500,372],[200,372],[200,620],[500,625],[770,395],[770,610],[795,185],[1075,185],[1050,420],[1330,415],[1300,590],[795,60],[1095,65],[625,180]], box: [1505, 975] },
+  paw: { text: '5 0 0-1,0-2,0-4,1-3,2-4', k: 2 },
+  c4p: { text: '6 0 0-4,1-5,2-4,2-5,3-4,3-5', k: 3 },
+  ladder4: { text: '10 0 0-1,1-2,2-3,4-5,5-6,6-7,0-4,1-5,2-6,3-7,0-8,7-9', k: 5,
+    coords: [[200,250],[400,250],[600,250],[800,250],[200,450],[400,450],[600,450],[800,450],[80,130],[920,570]], box: [1000, 640] },
+};
+
+function graphText() { return `${state.nodes.length} ${state.start} ${state.edges.map(([u, v]) => u + '-' + v).join(',')}`; }
+function adjOf(v) { const out = []; for (const [a, b] of state.edges) { if (a === v) out.push(b); else if (b === v) out.push(a); } return out; }
+function hasEdge(u, v) { return state.edges.some(([a, b]) => (a === u && b === v) || (a === v && b === u)); }
+function loadGraphText(text, coords, box) {
+  const parts = text.trim().split(/\s+/); const n = +parts[0], s = +parts[1] || 0;
+  if (!(n >= 1 && n <= 32)) throw new Error('n must be between 1 and 32');
+  const edges = [];
+  if (parts[2]) for (const e of parts[2].split(',')) { if (!e) continue; const [u, v] = e.split('-').map(Number); if (!(u >= 0 && u < n && v >= 0 && v < n && u !== v)) throw new Error('bad edge ' + e); if (!edges.some(([a, b]) => (a === u && b === v) || (a === v && b === u))) edges.push([Math.min(u, v), Math.max(u, v)]); }
+  const nodes = [];
+  if (coords) { const [bw, bh] = box; const sc = Math.min(900 / bw, 560 / bh); for (const [x, y] of coords) nodes.push({ x: 50 + x * sc, y: 40 + y * sc }); }
+  else for (let i = 0; i < n; i++) { const a = -Math.PI / 2 + 2 * Math.PI * i / n; nodes.push({ x: 500 + 250 * Math.cos(a), y: 320 + 240 * Math.sin(a) }); }
+  state.nodes = nodes; state.edges = edges; state.start = s < n ? s : 0; state.edgeFrom = null;
+  resetPlay(); save(); render();
+}
+
+// ------------------------------------------------------------ rule table helpers
+function tableText() { return [...state.table.entries()].sort().map(([r, a]) => `${r} ${a.paint}>${a.target === -1 ? 'stay' : a.target}`).join('\n'); }
+function parseTableText(text) {
+  const m = new Map();
+  for (let line of text.split('\n')) { line = line.split('#')[0].trim(); if (!line) continue; const [r, a] = line.split(/\s+/); if (!r || !a) throw new Error('bad line: ' + line); const [p, t] = a.split('>'); if (!/^\d+\.[0-9a-f]+$/.test(r) || p === undefined || t === undefined) throw new Error('bad line: ' + line); m.set(r, { paint: +p, target: t === 'stay' || t === 's' ? -1 : +t }); }
+  return m;
+}
+function defaultName() { return state.def === 'sweep' ? `sweep:${state.sweep.join(',')}` : state.def; }
+function requestText(cmd, extra) {
+  let s = `cmd ${cmd}\nk ${state.k}\ngraph ${graphText()}\ndefault ${defaultName()}\n`;
+  for (const [key, val] of Object.entries(extra || {})) s += `${key} ${val}\n`;
+  s += 'table\n' + tableText() + '\nend\n';
+  return s;
+}
+function bagChips(rowText) {
+  const [own, bag] = rowText.split('.'); let s = `<span class="chips" title="own colour"><i style="background:${PAL[+own]}"></i></span> · <span class="chips" title="neighbours">`;
+  for (let c = 0; c < bag.length; c++) for (let j = 0; j < parseInt(bag[c], 16); j++) s += `<i style="background:${PAL[c]}"></i>`;
+  return s + '</span>';
+}
+
+// ------------------------------------------------------------ persistence (per-browser convenience only)
+function save() { try { localStorage.setItem('cew.state', JSON.stringify({ k: state.k, nodes: state.nodes, edges: state.edges, start: state.start, table: [...state.table.entries()], def: state.def, sweep: state.sweep })); } catch (e) { /* storage unavailable */ } }
+function restore() {
+  try { const s = JSON.parse(localStorage.getItem('cew.state') || 'null'); if (!s || !s.nodes || !s.nodes.length) return false; state.k = s.k || 5; state.nodes = s.nodes; state.edges = s.edges || []; state.start = s.start || 0; state.table = new Map(s.table || []); state.def = s.def || 'none'; state.sweep = s.sweep || [0, 4, 0]; return true; } catch (e) { return false; }
+}
+
+// ------------------------------------------------------------ play
+function resetPlay() {
+  stopPlay();
+  const n = state.nodes.length;
+  state.play = n ? { colours: new Array(n).fill(0), cur: state.start, vis: new Set([state.start]), steps: [], seen: new Map(), pending: null, done: null, lastEdge: null, history: [] } : null;
+  state.replay = null; state.defining = null;
+  if (state.play) computePending();
+}
+function posKey(p) { return p.colours.join(',') + '|' + p.cur + '|' + [...p.vis].sort((a, b) => a - b).join(','); }
+function computePending() {
+  const p = state.play; p.pending = null;
+  if (p.vis.size === state.nodes.length) { p.done = { kind: 'explored' }; return; }
+  const key = posKey(p);
+  if (p.seen.has(key)) { p.done = { kind: 'confined', repeatAt: p.seen.get(key), unvisited: [...Array(state.nodes.length).keys()].filter((v) => !p.vis.has(v)) }; return; }
+  p.seen.set(key, p.steps.length);
+  if (!engine) return;
+  const r = engine(requestText('step', { colours: p.colours.join(' '), cur: p.cur, vis: [...p.vis].join(' ') }));
+  if (r.status !== 'ok') { p.done = { kind: 'error', message: r.message }; return; }
+  if (!r.defined) { p.pending = null; state.defining = { row: r.row, degree: r.degree }; return; }
+  p.pending = { row: r.row, paint: r.paint, target: r.target, options: r.options, auto: r.auto, source: r.source };
+}
+function applyChoice(choice) {
+  const p = state.play, pd = p.pending; if (!pd) return;
+  p.history.push({ colours: p.colours.slice(), cur: p.cur, vis: new Set(p.vis), steps: p.steps.length, seen: p.seen.size, lastEdge: p.lastEdge });
+  p.steps.push({ cur: p.cur, row: pd.row, paint: pd.paint, target: pd.target, options: pd.options, next: choice, source: pd.source });
+  p.colours[p.cur] = pd.paint;
+  if (choice !== null) { p.lastEdge = [p.cur, choice]; p.cur = choice; p.vis.add(choice); } else p.lastEdge = null;
+  state.defining = null;
+  computePending();
+}
+function undo() {
+  const p = state.play; const h = p.history.pop(); if (!h) return;
+  p.colours = h.colours; p.cur = h.cur; p.vis = h.vis; p.steps.length = h.steps; p.lastEdge = h.lastEdge; p.done = null;
+  const keys = [...p.seen.keys()]; for (let i = keys.length - 1; i >= h.seen - 1 && i >= 0; i--) p.seen.delete(keys[i]);
+  state.defining = null; computePending();
+}
+function stepOnce(auto) {
+  const p = state.play; if (!p || p.done) { stopPlay(); return; }
+  if (!p.pending) { stopPlay(); return; } // waiting for a row definition
+  const rp = state.replay;
+  if (rp && rp.index < rp.steps.length) { // follow a loaded execution
+    const st = rp.steps[rp.index]; rp.index++;
+    if (st.row !== p.pending.row) { rp.diverged = true; }
+    applyChoice(st.next === null ? null : st.next); return;
+  }
+  const opts = p.pending.options;
+  if (opts.length === 0) { applyChoice(null); return; }
+  if (opts.length === 1) { applyChoice(opts[0]); return; }
+  if (auto) { applyChoice(p.pending.auto); return; }
+  stopPlay(); flash('Your move as the adversary: click one of the highlighted vertices, or Auto step.');
+}
+function stopPlay() { if (state.timer) { clearInterval(state.timer); state.timer = null; } const b = $('#b-play'); if (b) b.textContent = '▶ Play'; }
+function togglePlay() {
+  if (state.timer) { stopPlay(); return; }
+  if (!state.play || state.play.done) return;
+  $('#b-play').textContent = '❚❚ Pause';
+  state.timer = setInterval(() => { stepOnce(true); render(); if (!state.play.pending) stopPlay(); }, 1300 / +$('#speed').value);
+}
+function loadReplay(trace) { resetPlay(); state.replay = { steps: trace.steps, index: 0, repeatAt: trace.repeat_at, unvisited: trace.unvisited, diverged: false }; switchTab('play'); render(); }
+
+// ------------------------------------------------------------ rendering
+const NAMES = (i) => String(i);
+function render() { renderGraph(); renderPlay(); renderRules(); renderLegend(); renderHint(); }
+function renderLegend() { $('#legend').innerHTML = [...Array(state.k).keys()].map((c) => `<span><span class="sw" style="background:${PAL[c]}"></span>${c === 0 ? 'white' : c}</span>`).join('') + '<span><span class="sw" style="border:3px solid var(--pen);width:10px;height:10px"></span>agent</span><span><span class="sw" style="border:2px dashed var(--bad)"></span>never visited</span>'; }
+function renderHint() {
+  const h = { node: 'Click on empty space to add a vertex.', edge: state.edgeFrom === null ? 'Click a vertex, then another, to join them.' : `Now click the vertex to join with ${state.edgeFrom} (click it again to cancel).`, move: 'Drag vertices to arrange the drawing.', delete: 'Click a vertex or an edge to remove it.', start: 'Click the vertex where the agent starts.' }[state.mode];
+  $('#hint').textContent = h;
+}
+function renderGraph() {
+  const p = state.play, svg = $('#svg');
+  const optionSet = new Set(p && p.pending && p.pending.options.length >= 2 && !(state.replay && state.replay.index < state.replay.steps.length) ? p.pending.options : []);
+  const unv = new Set(p && p.done && p.done.kind === 'confined' ? p.done.unvisited : []);
+  let s = '';
+  state.edges.forEach(([u, v], i) => {
+    const a = state.nodes[u], b = state.nodes[v];
+    const hot = p && p.lastEdge && ((p.lastEdge[0] === u && p.lastEdge[1] === v) || (p.lastEdge[0] === v && p.lastEdge[1] === u));
+    s += `<line class="edge" data-i="${i}" x1="${a.x}" y1="${a.y}" x2="${b.x}" y2="${b.y}" style="stroke:var(--pen)" stroke-width="${hot ? 7 : 3}" stroke-linecap="round" opacity="${hot ? 1 : 0.7}"/>`;
+    s += `<line class="edgehit" data-i="${i}" x1="${a.x}" y1="${a.y}" x2="${b.x}" y2="${b.y}" stroke="transparent" stroke-width="16" style="cursor:${state.mode === 'delete' ? 'pointer' : 'default'}"/>`;
+  });
+  state.nodes.forEach((nd, i) => {
+    const col = p ? p.colours[i] : 0, isCur = p && p.cur === i, r = 18;
+    s += `<g class="node${optionSet.has(i) ? ' option' : ''}" data-i="${i}" style="cursor:${state.mode === 'move' ? 'grab' : 'pointer'}">`;
+    if (optionSet.has(i)) s += `<circle class="halo" cx="${nd.x}" cy="${nd.y}" r="${r * 1.9}" style="fill:var(--pen)" opacity=".5"/>`;
+    if (isCur) s += `<circle cx="${nd.x}" cy="${nd.y}" r="${r * 1.5}" fill="none" style="stroke:var(--pen)" stroke-width="5"/>`;
+    if (unv.has(i)) s += `<circle cx="${nd.x}" cy="${nd.y}" r="${r * 1.5}" fill="none" style="stroke:var(--bad)" stroke-width="3" stroke-dasharray="6 5"/>`;
+    if (state.edgeFrom === i) s += `<circle cx="${nd.x}" cy="${nd.y}" r="${r * 1.35}" fill="none" style="stroke:var(--warn)" stroke-width="3"/>`;
+    s += `<circle cx="${nd.x}" cy="${nd.y}" r="${r}" style="fill:${PAL[col]};stroke:var(--ink)" stroke-width="2.5"/>`;
+    s += `<text x="${nd.x}" y="${nd.y}" dy=".35em" text-anchor="middle" style="font-family:var(--mono);font-weight:600;font-size:14px;pointer-events:none" fill="${col === 3 || col === 4 || col === 5 ? '#fff' : '#241f45'}">${NAMES(i)}</text>`;
+    if (i === state.start) s += `<text x="${nd.x}" y="${nd.y - r - 8}" text-anchor="middle" style="font-size:11px;fill:var(--soft);pointer-events:none">start</text>`;
+    s += '</g>';
+  });
+  svg.innerHTML = s;
+}
+function renderPlay() {
+  const p = state.play, box = $('#playstatus');
+  if (!p) { box.innerHTML = '<p class="note">Draw a graph to start.</p>'; $('#ledger tbody').innerHTML = ''; return; }
+  let s = `<div class="row"><b>Step ${p.steps.length}</b><span class="small">agent at <b>${NAMES(p.cur)}</b>, ${p.vis.size} of ${state.nodes.length} visited</span>${state.replay ? `<span class="small" style="color:var(--pen)">replaying a found execution (${Math.min(state.replay.index, state.replay.steps.length)}/${state.replay.steps.length})</span>` : ''}</div>`;
+  if (state.defining) {
+    const d = state.defining;
+    s += `<div class="banner warn">The rule has no action for the row <span class="mono">${d.row}</span> ${bagChips(d.row)} read at ${NAMES(p.cur)}. Define it:</div>
+      <div class="row">paint <select id="def-paint">${colourOptions(false)}</select> target <select id="def-target">${colourOptions(true)}</select> <button type="button" id="b-define" class="primary">Define and continue</button></div>
+      <p class="note">The row goes into the table (Rules tab) and the play resumes.</p>`;
+  } else if (p.pending) {
+    const pd = p.pending;
+    s += `<div class="row small">reads <span class="mono">${pd.row}</span> ${bagChips(pd.row)} <span style="color:var(--soft)">(${pd.source})</span></div>`;
+    s += `<div class="row small">paints <span class="sw" style="background:${PAL[pd.paint]}"></span>${CNAME[pd.paint]}, then ${pd.target === -1 ? 'stays' : pd.options.length === 0 ? `no ${CNAME[pd.target]} neighbour: stays` : `moves to a <b>${CNAME[pd.target]}</b> neighbour`}</div>`;
+    if (pd.options.length) s += `<div class="row small">adversary may serve: ${pd.options.map((u) => `<b>${NAMES(u)}</b>`).join(', ')}${pd.options.length >= 2 ? ` · auto would pick <b>${NAMES(pd.auto)}</b>` : ''}</div>`;
+    if (pd.options.length >= 2 && !(state.replay && state.replay.index < state.replay.steps.length)) s += `<div class="banner neutral" id="choicehint">Your move as the adversary: click a highlighted vertex (or Auto step).</div>`;
+  } else if (p.done) {
+    if (p.done.kind === 'explored') s += `<div class="banner good">Explored: all ${state.nodes.length} vertices visited in ${p.steps.length} steps.</div>`;
+    else if (p.done.kind === 'confined') s += `<div class="banner bad">Trapped: the position after step ${p.steps.length} already occurred before step ${p.done.repeatAt + 1}, so these ${p.steps.length - p.done.repeatAt} steps repeat for ever. Never visited: <b>${p.done.unvisited.map(NAMES).join(', ')}</b>.</div>`;
+    else s += `<div class="banner bad">${p.done.message}</div>`;
+  }
+  if (p.history.length) s += `<div class="row"><button type="button" id="b-undo">◀ Undo step</button></div>`;
+  box.innerHTML = s;
+  const tb = $('#ledger tbody'); let rows = '';
+  const cycFrom = p.done && p.done.kind === 'confined' ? p.done.repeatAt : (state.replay && state.replay.index >= state.replay.steps.length ? state.replay.repeatAt : null);
+  p.steps.forEach((st, i) => {
+    rows += `<tr class="${cycFrom !== null && cycFrom !== undefined && i >= cycFrom ? 'cycle' : ''}"><td class="mono">${i}</td><td><b>${NAMES(st.cur)}</b></td><td><span class="mono">${st.row}</span> ${bagChips(st.row)}</td><td><span class="sw" style="background:${PAL[st.paint]}"></span>${st.target === -1 ? 'stay' : '→ ' + CNAME[st.target]}</td><td>${st.options.map(NAMES).join(', ') || '—'}</td><td>${st.next === null ? 'stays' : `<b>${NAMES(st.next)}</b>${st.options.length >= 2 ? ' ◆' : ''}`}</td></tr>`;
+  });
+  tb.innerHTML = rows || '<tr><td colspan="6" class="note">No steps yet.</td></tr>';
+  const last = tb.querySelector('tr:last-child'); if (last) last.scrollIntoView({ block: 'nearest' });
+  const bDefine = $('#b-define'); if (bDefine) bDefine.addEventListener('click', () => { const row = state.defining.row; state.table.set(row, { paint: +$('#def-paint').value, target: +$('#def-target').value }); save(); state.defining = null; p.seen.delete(posKey(p)); computePending(); render(); });
+  const bUndo = $('#b-undo'); if (bUndo) bUndo.addEventListener('click', () => { stopPlay(); undo(); render(); });
+  $('#b-step').disabled = !!p.done; $('#b-auto').disabled = !!p.done; $('#b-play').disabled = !!p.done;
+}
+function colourOptions(withStay) { let s = ''; for (let c = 0; c < state.k; c++) s += `<option value="${c}">${c === 0 ? '0 white' : c}</option>`; if (withStay) s += '<option value="-1">stay</option>'; return s; }
+function renderRules() {
+  $('#default').value = state.def; $('#sweepparams').hidden = state.def !== 'sweep';
+  ['sw-c', 'sw-t', 'sw-p'].forEach((id, j) => { const sel = $('#' + id); const max = j === 1 ? 4 : 6; if (sel.options.length !== max + 1) { sel.innerHTML = [...Array(max + 1).keys()].map((v) => `<option>${v}</option>`).join(''); } sel.value = state.sweep[j]; });
+  $('#newpaint').innerHTML = colourOptions(false); $('#newtarget').innerHTML = colourOptions(true);
+  $('#rowcount').textContent = state.table.size ? `(${state.table.size})` : '';
+  const tb = $('#rules tbody');
+  tb.innerHTML = [...state.table.entries()].sort().map(([r, a]) => `<tr data-row="${r}"><td class="mono">${r}</td><td>${bagChips(r)}</td><td><select class="e-paint">${colourOptions(false)}</select></td><td><select class="e-target">${colourOptions(true)}</select></td><td><button type="button" class="e-del" title="remove">✕</button></td></tr>`).join('') || '<tr><td colspan="5" class="note">No rows yet. Define rows while playing, add them here, or paste a table below.</td></tr>';
+  tb.querySelectorAll('tr[data-row]').forEach((tr) => {
+    const r = tr.dataset.row, a = state.table.get(r); tr.querySelector('.e-paint').value = a.paint; tr.querySelector('.e-target').value = a.target;
+    tr.querySelector('.e-paint').addEventListener('change', (e) => { state.table.set(r, { paint: +e.target.value, target: state.table.get(r).target }); save(); resetPlay(); render(); });
+    tr.querySelector('.e-target').addEventListener('change', (e) => { state.table.set(r, { paint: state.table.get(r).paint, target: +e.target.value }); save(); resetPlay(); render(); });
+    tr.querySelector('.e-del').addEventListener('click', () => { state.table.delete(r); save(); resetPlay(); render(); });
+  });
+}
+function flash(msg) { const el = $('#choicehint'); if (el) { el.style.fontWeight = '700'; setTimeout(() => { el.style.fontWeight = ''; }, 700); } else if (msg) { $('#playstatus').insertAdjacentHTML('beforeend', `<div class="banner neutral">${msg}</div>`); } }
+function switchTab(name) { document.querySelectorAll('.tabs button').forEach((b) => b.setAttribute('aria-selected', String(b.dataset.tab === name))); document.querySelectorAll('.panel').forEach((p) => p.classList.toggle('active', p.id === 'panel-' + name)); }
+
+// ------------------------------------------------------------ analysis
+function traceSummary(r) {
+  const t = r.trace;
+  if (r.status === 'explores') return `<div class="banner good"><b>Explores against every adversary.</b> ${r.positions.toLocaleString()} positions enumerated, none losing. The adversary can delay the last visit to step ${t.steps.length} at most; that longest obstruction is loaded below.</div>`;
+  if (r.status === 'fails') return `<div class="banner bad"><b>Fails.</b> ${r.method === 'exact game' ? `Exact game over ${r.positions.toLocaleString()} positions: the adversary has a strategy that never visits <b>${t.unvisited.map(NAMES).join(', ')}</b>.` : `Found by an adversary ${r.method}: <b>${t.unvisited.map(NAMES).join(', ')}</b> never visited.`} The trapping execution has ${t.steps.length} steps, the last ${t.steps.length - t.repeat_at} repeating for ever.</div>`;
+  return '';
+}
+async function analyse(cmd) {
+  if (!engine || !state.play) return;
+  const out = $('#analysis'); out.innerHTML = '<div class="banner neutral">Running…</div>'; $('#b-exact').disabled = true; $('#b-walks').disabled = true; $('#b-cancel').disabled = false;
+  const extra = cmd === 'exact' ? { cap: Math.max(1000, +$('#cap').value || 1000000) } : { walks: Math.max(0, +$('#walks').value || 0), budget: 200000 };
+  const r = await runInWorker(requestText(cmd, extra));
+  $('#b-exact').disabled = false; $('#b-walks').disabled = false; $('#b-cancel').disabled = true;
+  if (!r) return;
+  let s = '';
+  if (r.status === 'error') s = `<div class="banner bad">${r.message}</div>`;
+  else if (r.status === 'undefined') { s = `<div class="banner warn">The rule has no action for the row <span class="mono">${r.row}</span> ${bagChips(r.row)}, reached after ${r.path.steps.length} steps. Load the path to see the position and define the row in the Play tab.</div><div class="row"><button type="button" id="b-load-path">Load path</button></div>`; }
+  else if (r.status === 'overflow') s = `<div class="banner warn">More than ${r.positions.toLocaleString()} positions: raise the cap (memory permitting) or try the walks.</div>`;
+  else if (r.status === 'unrefuted') s = `<div class="banner warn">All ${r.walks} adversary walks explored the graph. That is not a proof: run the exact game.</div>`;
+  else s = traceSummary(r) + `<div class="row"><button type="button" id="b-load-trace" class="primary">Load this execution into the player</button></div>`;
+  out.innerHTML = s;
+  const lt = $('#b-load-trace'); if (lt) lt.addEventListener('click', () => loadReplay(r.trace));
+  const lp = $('#b-load-path'); if (lp) lp.addEventListener('click', () => { loadReplay(r.path); const rp = state.replay; let guard = 0; while (rp.index < rp.steps.length && state.play.pending && guard++ < 10000) stepOnce(true); render(); });
+}
+
+// ------------------------------------------------------------ canvas interaction
+const svg = $('#svg');
+function svgPoint(evt) { const pt = svg.createSVGPoint(); pt.x = evt.clientX; pt.y = evt.clientY; const m = svg.getScreenCTM().inverse(); const q = pt.matrixTransform(m); return { x: Math.max(20, Math.min(980, q.x)), y: Math.max(20, Math.min(620, q.y)) }; }
+function deleteNode(i) {
+  state.nodes.splice(i, 1);
+  state.edges = state.edges.filter(([u, v]) => u !== i && v !== i).map(([u, v]) => [u > i ? u - 1 : u, v > i ? v - 1 : v]);
+  if (state.start === i) state.start = 0; else if (state.start > i) state.start--;
+  state.edgeFrom = null;
+}
+svg.addEventListener('pointerdown', (evt) => {
+  const nodeEl = evt.target.closest('.node'), edgeEl = evt.target.closest('.edgehit');
+  const p = state.play;
+  if (nodeEl) {
+    const i = +nodeEl.dataset.i;
+    if (p && p.pending && p.pending.options.length >= 2 && p.pending.options.includes(i) && !(state.replay && state.replay.index < state.replay.steps.length)) { stopPlay(); applyChoice(i); render(); return; }
+    if (state.mode === 'edge') { if (state.edgeFrom === null) state.edgeFrom = i; else if (state.edgeFrom === i) state.edgeFrom = null; else { if (!hasEdge(state.edgeFrom, i)) state.edges.push([Math.min(state.edgeFrom, i), Math.max(state.edgeFrom, i)]); state.edgeFrom = null; resetPlay(); save(); } render(); return; }
+    if (state.mode === 'delete') { deleteNode(i); resetPlay(); save(); render(); return; }
+    if (state.mode === 'start') { state.start = i; resetPlay(); save(); render(); return; }
+    if (state.mode === 'move' || state.mode === 'node') { state.drag = { i, moved: false }; svg.setPointerCapture(evt.pointerId); return; }
+    return;
+  }
+  if (edgeEl && state.mode === 'delete') { state.edges.splice(+edgeEl.dataset.i, 1); resetPlay(); save(); render(); return; }
+  if (state.mode === 'node' && !nodeEl && !edgeEl) {
+    if (state.nodes.length >= 32) { flash('At most 32 vertices.'); return; }
+    const q = svgPoint(evt); state.nodes.push({ x: q.x, y: q.y }); resetPlay(); save(); render(); return;
+  }
+  if (state.mode === 'edge') { state.edgeFrom = null; render(); }
+});
+svg.addEventListener('pointermove', (evt) => { if (!state.drag) return; const q = svgPoint(evt); const nd = state.nodes[state.drag.i]; nd.x = q.x; nd.y = q.y; state.drag.moved = true; renderGraph(); });
+svg.addEventListener('pointerup', () => { if (state.drag) { if (state.drag.moved) save(); state.drag = null; } });
+svg.addEventListener('dblclick', (evt) => { const nodeEl = evt.target.closest('.node'); if (nodeEl) { state.start = +nodeEl.dataset.i; resetPlay(); save(); render(); } });
+
+// ------------------------------------------------------------ controls
+document.querySelectorAll('header [data-mode]').forEach((b) => b.addEventListener('click', () => { state.mode = b.dataset.mode; state.edgeFrom = null; document.querySelectorAll('header [data-mode]').forEach((x) => x.setAttribute('aria-pressed', String(x === b))); render(); }));
+document.querySelectorAll('.tabs button').forEach((b) => b.addEventListener('click', () => switchTab(b.dataset.tab)));
+$('#k').addEventListener('change', (e) => { state.k = +e.target.value; let dropped = 0; for (const [r, a] of [...state.table.entries()]) { const own = +r.split('.')[0], bag = r.split('.')[1]; if (own >= state.k || a.paint >= state.k || a.target >= state.k || bag.length > state.k || [...bag].some((d, i) => i >= state.k && d !== '0')) { state.table.delete(r); dropped++; } } if (dropped) flash(`${dropped} table rows used colours beyond the new palette and were removed.`); save(); resetPlay(); render(); });
+$('#preset').addEventListener('change', (e) => { const v = e.target.value; e.target.value = ''; if (!v) return; if (v === 'clear') { state.nodes = []; state.edges = []; state.start = 0; resetPlay(); save(); render(); return; } const pr = PRESETS[v]; state.k = pr.k; $('#k').value = pr.k; loadGraphText(pr.text, pr.coords, pr.box); });
+$('#b-import-graph').addEventListener('click', () => { $('#graphtext').value = graphText(); $('#graphdialog').showModal(); });
+$('#b-graph-close').addEventListener('click', () => $('#graphdialog').close());
+$('#b-graph-apply').addEventListener('click', () => { try { loadGraphText($('#graphtext').value); $('#graphdialog').close(); } catch (err) { alert(err.message); } });
+$('#default').addEventListener('change', (e) => { state.def = e.target.value; save(); resetPlay(); render(); });
+['sw-c', 'sw-t', 'sw-p'].forEach((id, j) => $('#' + id).addEventListener('change', (e) => { state.sweep[j] = +e.target.value; save(); resetPlay(); render(); }));
+$('#b-addrow').addEventListener('click', () => { const r = $('#newrow').value.trim(); if (!/^\d+\.[0-9a-f]+$/.test(r)) { alert('A row looks like 1.2010: own colour, a dot, one digit per colour.'); return; } state.table.set(r, { paint: +$('#newpaint').value, target: +$('#newtarget').value }); $('#newrow').value = ''; save(); resetPlay(); render(); });
+$('#b-table-import').addEventListener('click', () => { try { state.table = parseTableText($('#tabletext').value); save(); resetPlay(); render(); } catch (err) { alert(err.message); } });
+$('#b-table-export').addEventListener('click', () => { $('#tabletext').value = `# cegis rule k=${state.k} rows=${state.table.size}\n` + tableText(); });
+$('#b-table-clear').addEventListener('click', () => { state.table = new Map(); save(); resetPlay(); render(); });
+$('#b-reset').addEventListener('click', () => { resetPlay(); render(); });
+$('#b-step').addEventListener('click', () => { stopPlay(); stepOnce(false); render(); });
+$('#b-auto').addEventListener('click', () => { stopPlay(); stepOnce(true); render(); });
+$('#b-play').addEventListener('click', () => { togglePlay(); });
+$('#speed').addEventListener('input', () => { if (state.timer) { stopPlay(); togglePlay(); } });
+$('#b-exact').addEventListener('click', () => analyse('exact'));
+$('#b-walks').addEventListener('click', () => analyse('walks'));
+$('#b-cancel').addEventListener('click', () => { startWorker(); pending.clear(); $('#analysis').innerHTML = '<div class="banner neutral">Cancelled.</div>'; $('#b-exact').disabled = false; $('#b-walks').disabled = false; $('#b-cancel').disabled = true; });
+document.addEventListener('keydown', (e) => {
+  if (['INPUT', 'SELECT', 'TEXTAREA'].includes(e.target.tagName) || $('#graphdialog').open) return;
+  const modes = { n: 'node', e: 'edge', m: 'move', d: 'delete', s: 'start' };
+  if (modes[e.key]) { document.querySelector(`header [data-mode="${modes[e.key]}"]`).click(); }
+  else if (e.key === 'ArrowRight') { stopPlay(); stepOnce(false); render(); }
+  else if (e.key === 'a') { stopPlay(); stepOnce(true); render(); }
+  else if (e.key === ' ') { e.preventDefault(); togglePlay(); }
+});
+
+// ------------------------------------------------------------ start
+if (!restore()) { const pr = PRESETS.sketch1; state.k = 5; loadGraphText(pr.text, pr.coords, pr.box); state.def = 'sigma'; save(); }
+$('#k').value = state.k;
+resetPlay(); render();
+})();
+</script>
+</body>
+</html>
