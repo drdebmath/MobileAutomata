@@ -89,8 +89,10 @@ impl Row {
     }
 }
 
-/// `target`: a colour, or `STAY` (the agent keeps its place).
+/// `target`: a colour, `STAY` (the agent keeps its place) or `STOP` (the
+/// agent terminates on this vertex, after painting it).
 pub const STAY: u8 = 255;
+pub const STOP: u8 = 254;
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct Action {
@@ -102,6 +104,8 @@ impl Action {
     pub fn text(&self) -> String {
         if self.target == STAY {
             format!("{}>stay", self.paint)
+        } else if self.target == STOP {
+            format!("{}>stop", self.paint)
         } else {
             format!("{}>{}", self.paint, self.target)
         }
@@ -110,7 +114,14 @@ impl Action {
         let (p, t) = s.trim().split_once('>')?;
         let paint: u8 = p.trim().parse().ok()?;
         let t = t.trim();
-        let target = if t == "stay" || t == "s" || t == "-" { STAY } else { t.parse().ok()? };
+        let target = if t == "stay" || t == "s" || t == "-" {
+            STAY
+        } else if t == "stop" {
+            STOP
+        } else {
+            // a number is a colour: 254 and 255 are the codes of stop and stay, not colours
+            t.parse::<u8>().ok().filter(|&c| c < STOP)?
+        };
         Some(Action { paint, target })
     }
 }
@@ -152,6 +163,9 @@ impl Graph {
                     edges.push((u.min(v), u.max(v)));
                 }
             }
+        }
+        if it.next().is_some() {
+            return Err("graph: unexpected text after the edge list (edges are `u-v` separated by commas, without spaces)".into());
         }
         let g = Graph { n, s, adj, edges };
         if !g.is_connected() {
@@ -208,6 +222,8 @@ pub struct Pos {
     pub chi: u128,
     pub cur: u8,
     pub vis: u32,
+    /// the agent has stopped (paper model): no move follows
+    pub term: bool,
 }
 
 pub fn colour(chi: u128, v: u8) -> u8 {
@@ -225,7 +241,7 @@ pub fn row_at(g: &Graph, chi: u128, v: u8) -> Row {
 }
 /// The neighbours the adversary may serve for the target colour `t`.
 pub fn options(g: &Graph, chi: u128, v: u8, t: u8) -> Vec<u8> {
-    if t == STAY {
+    if t == STAY || t == STOP {
         return vec![];
     }
     g.neighbours(v).filter(|&u| colour(chi, u) == t).collect()
@@ -243,9 +259,283 @@ pub enum Formula {
     Chase3,
     /// paint own colour, chase white, else stay: the engine's default for unlisted rows
     ChaseWhite,
+    /// A_Gen6 of Takahashi et al. (arXiv 2505.02789, Algorithm 2): six colours,
+    /// simulates a semi-DFS and stops on the start vertex
+    AGen6,
+    /// A_TC3 of Hiraoka, Imori, Takahashi and Sudo (arXiv 2609.14356, Algorithm 1): three colours,
+    /// every tree and every simple cycle
+    ATC3,
+    /// A_C4 (same paper, Algorithm 2): four colours, every graph whose blocks are cycles or
+    /// complete bipartite graphs (so every cactus)
+    AC4,
+    /// A_US5 (same paper, Algorithm 3): five colours, every graph whose blocks are cliques or
+    /// triangle-free; a semi-DFS like A_Gen6
+    AUS5,
 }
 
 impl Formula {
+    /// A_Gen6 (Algorithm 2 of Takahashi et al.): the action on `row` and the number of the paper's rule
+    /// that gave it; `None` for a fin vertex, for which the paper defines no rule (the agent is on a fin
+    /// vertex only after it has stopped).  Within one own colour the first matching rule wins.
+    /// Colours: 0 init, 1 path, 2 fin, 3 head1, 4 head2, 5 neigh.
+    fn agen6(row: &Row) -> Option<(Action, u8)> {
+        const INIT: u8 = 0;
+        const PATH: u8 = 1;
+        const FIN: u8 = 2;
+        const HEAD1: u8 = 3;
+        const HEAD2: u8 = 4;
+        const NEIGH: u8 = 5;
+        let mv = |paint: u8, target: u8| Action { paint, target };
+        Some(match row.own {
+            INIT => {
+                if row.present(PATH) {
+                    (mv(NEIGH, HEAD1), 1)
+                } else if row.present(HEAD1) {
+                    (mv(HEAD1, HEAD1), 2)
+                } else {
+                    (mv(HEAD1, STAY), 3)
+                }
+            }
+            HEAD1 => {
+                if row.present(INIT) && !row.present(HEAD1) {
+                    (mv(HEAD1, INIT), 4)
+                } else {
+                    (mv(HEAD2, STAY), 5)
+                }
+            }
+            HEAD2 => {
+                if row.present(NEIGH) {
+                    (mv(HEAD2, NEIGH), 6)
+                } else if row.present(HEAD1) {
+                    (mv(PATH, HEAD1), 7)
+                } else if row.present(PATH) {
+                    (mv(FIN, PATH), 8)
+                } else {
+                    (mv(FIN, STOP), 9)
+                }
+            }
+            PATH => (mv(HEAD1, STAY), 10),
+            NEIGH => (mv(INIT, HEAD2), 11),
+            _ => return None,
+        })
+    }
+
+    /// A_TC3 (Algorithm 1 of Hiraoka et al.): the action on `row` and the number of the paper's rule (D1 to D11)
+    /// that gave it; `None` where the paper gives no output, which it proves unreachable (an ℓ0 or ℓ1 vertex
+    /// seeing neither of the neighbours listed).  Within one own colour the first matching rule wins ("else if").
+    /// Colours: 0 init, 1 l0 (the paper's ℓ0), 2 l1 (ℓ1).
+    fn atc3(row: &Row) -> Option<(Action, u8)> {
+        const INIT: u8 = 0;
+        const L0: u8 = 1;
+        const L1: u8 = 2;
+        let mv = |paint: u8, target: u8| Action { paint, target };
+        let has = |c: u8| row.present(c);
+        Some(match row.own {
+            INIT => {
+                if !has(INIT) && !has(L0) && !has(L1) {
+                    (mv(L1, STOP), 1) // D1: no neighbour at all (the start vertex of a graph with one vertex)
+                } else if has(INIT) && !has(L0) && !has(L1) {
+                    (mv(L0, INIT), 2) // D2: the start vertex, every neighbour init
+                } else if has(INIT) && has(L0) {
+                    (mv(L1, INIT), 3) // D3: probe an init child
+                } else if has(INIT) && has(L1) {
+                    (mv(INIT, L1), 4) // D4: the probed child has children: undo and go back
+                } else if has(L1) {
+                    (mv(L1, L1), 5) // D5: the probed child is a leaf: finish it and go back
+                } else if has(L0) {
+                    (mv(L1, L0), 6) // D6: a leaf entered from an l0 parent
+                } else {
+                    return None;
+                }
+            }
+            L0 => {
+                if has(INIT) && has(L1) {
+                    (mv(L0, INIT), 7)
+                } else if has(L0) && has(L1) {
+                    (mv(L1, L0), 8)
+                } else if has(L1) && !has(INIT) && !has(L0) {
+                    (mv(L1, STOP), 9)
+                } else {
+                    return None;
+                }
+            }
+            L1 => {
+                if has(INIT) && has(L0) {
+                    (mv(L0, INIT), 10)
+                } else if has(L0) && has(L1) {
+                    (mv(L1, L0), 11)
+                } else {
+                    return None;
+                }
+            }
+            _ => return None,
+        })
+    }
+
+    /// A_C4 (Algorithm 2 of Hiraoka et al.): the action on `row` and the number of the paper's rule (C1 to C14)
+    /// that gave it; `None` for a fin vertex (the paper has no rule for it: fin is never requested, so the agent is
+    /// never on one) and for the observations the paper proves unreachable (an init vertex seeing only init and fin).
+    /// Rules C1 and C2 look only at the neighbours and apply to every own colour but fin; then the rules of the own colour.
+    /// Colours: 0 init, 1 fin, 2 front, 3 path.
+    fn ac4(row: &Row) -> Option<(Action, u8)> {
+        const INIT: u8 = 0;
+        const FIN: u8 = 1;
+        const FRONT: u8 = 2;
+        const PATH: u8 = 3;
+        let mv = |paint: u8, target: u8| Action { paint, target };
+        let has = |c: u8| row.present(c);
+        if row.own == FIN || row.own > PATH {
+            return None;
+        }
+        if !has(INIT) && !has(FRONT) && !has(PATH) {
+            return Some((mv(FIN, STOP), 1)); // C1: everything around is finished (or nothing is): stop
+        }
+        if !has(FIN) && !has(FRONT) && !has(PATH) {
+            return Some((mv(FRONT, INIT), 2)); // C2: every neighbour init: the start of a block
+        }
+        Some(match row.own {
+            INIT => {
+                if !has(FRONT) && !has(INIT) {
+                    (mv(FIN, PATH), 3)
+                } else if !has(INIT) {
+                    (mv(FIN, FRONT), 4)
+                } else if has(FRONT) && has(PATH) {
+                    (mv(PATH, INIT), 5)
+                } else if has(PATH) {
+                    (mv(FRONT, INIT), 6)
+                } else if has(FRONT) {
+                    (mv(FRONT, FRONT), 7)
+                } else {
+                    return None;
+                }
+            }
+            FRONT => {
+                if has(FRONT) {
+                    (mv(PATH, FRONT), 8)
+                } else if has(INIT) {
+                    (mv(FRONT, INIT), 9)
+                } else {
+                    (mv(FIN, PATH), 10)
+                }
+            }
+            _ => {
+                // PATH
+                if !has(FRONT) && has(INIT) {
+                    (mv(FRONT, INIT), 11)
+                } else if has(FRONT) && has(INIT) {
+                    (mv(PATH, INIT), 12)
+                } else if has(FRONT) {
+                    (mv(FIN, FRONT), 13)
+                } else {
+                    (mv(FIN, PATH), 14)
+                }
+            }
+        })
+    }
+
+    /// A_US5 (Algorithm 3 of Hiraoka et al.): the action on `row` and the number of the paper's rule (U1 to U19)
+    /// that gave it; `None` for a fin vertex (never requested, so never occupied).  It simulates the same semi-DFS
+    /// as A_Gen6 with five colours: rules U1, U3-U5, U7-U13, U17 and U19 are the rules of Takahashi et al.'s
+    /// triangle-free algorithm, U2, U6, U14-U16 and U18 are new.  Within one own colour the first matching rule wins.
+    /// Colours: 0 init, 1 path, 2 neigh, 3 fin, 4 head.
+    fn aus5(row: &Row) -> Option<(Action, u8)> {
+        const INIT: u8 = 0;
+        const PATH: u8 = 1;
+        const NEIGH: u8 = 2;
+        const FIN: u8 = 3;
+        const HEAD: u8 = 4;
+        let mv = |paint: u8, target: u8| Action { paint, target };
+        let has = |c: u8| row.present(c);
+        Some(match row.own {
+            INIT => {
+                if has(INIT) && !has(PATH) && !has(NEIGH) && !has(FIN) && !has(HEAD) {
+                    (mv(PATH, INIT), 1)
+                } else if has(NEIGH) && !has(HEAD) {
+                    (mv(PATH, STAY), 2)
+                } else if has(HEAD) && has(PATH) {
+                    (mv(NEIGH, HEAD), 3)
+                } else if has(HEAD) && !has(PATH) {
+                    (mv(HEAD, HEAD), 4)
+                } else {
+                    (mv(HEAD, STAY), 5)
+                }
+            }
+            HEAD => {
+                if has(INIT) && has(NEIGH) && !has(PATH) && !has(HEAD) {
+                    (mv(FIN, INIT), 6)
+                } else if has(HEAD) && has(NEIGH) {
+                    (mv(HEAD, NEIGH), 7)
+                } else if has(HEAD) && has(PATH) {
+                    (mv(PATH, HEAD), 8)
+                } else if has(HEAD) {
+                    (mv(FIN, HEAD), 9)
+                } else if has(PATH) && has(INIT) {
+                    (mv(HEAD, INIT), 10)
+                } else if has(PATH) {
+                    (mv(HEAD, PATH), 11)
+                } else if has(INIT) {
+                    (mv(PATH, INIT), 12)
+                } else {
+                    (mv(FIN, STOP), 13)
+                }
+            }
+            PATH => {
+                if has(NEIGH) && has(HEAD) {
+                    (mv(INIT, HEAD), 14)
+                } else if has(NEIGH) {
+                    (mv(PATH, NEIGH), 15)
+                } else if !has(HEAD) {
+                    (mv(HEAD, STAY), 16)
+                } else {
+                    (mv(HEAD, HEAD), 17)
+                }
+            }
+            NEIGH => {
+                if has(PATH) && !has(HEAD) {
+                    (mv(INIT, PATH), 18)
+                } else {
+                    (mv(INIT, HEAD), 19)
+                }
+            }
+            _ => return None, // fin (and colours beyond the palette)
+        })
+    }
+
+    /// The algorithms of the papers: the name a request uses and the number of colours each needs (a palette
+    /// with more colours leaves the others unused).  `None` for the other formulas.  These algorithms stop
+    /// the agent, so a request that names one is judged by the paper's model unless it asks otherwise.
+    pub fn paper_algorithm(&self) -> Option<(&'static str, u8)> {
+        match self {
+            Formula::AGen6 => Some(("agen6", 6)),
+            Formula::ATC3 => Some(("atc3", 3)),
+            Formula::AC4 => Some(("ac4", 4)),
+            Formula::AUS5 => Some(("aus5", 5)),
+            _ => None,
+        }
+    }
+
+    /// The action on `row` and the number of the paper's rule behind it, for the paper's algorithms
+    /// (with fewer colours than the algorithm needs there is no answer).
+    fn numbered(&self, row: &Row, k: u8) -> Option<(Action, u8)> {
+        let (_, need) = self.paper_algorithm()?;
+        if k < need {
+            return None;
+        }
+        match self {
+            Formula::AGen6 => Formula::agen6(row),
+            Formula::ATC3 => Formula::atc3(row),
+            Formula::AC4 => Formula::ac4(row),
+            Formula::AUS5 => Formula::aus5(row),
+            _ => None,
+        }
+    }
+
+    /// The number of the paper's rule that answers `row`, for the formulas that have numbered rules
+    /// (the paper's algorithms).
+    pub fn rule_number(&self, row: &Row, k: u8) -> Option<u8> {
+        self.numbered(row, k).map(|(_, n)| n)
+    }
+
     pub fn parse(name: &str) -> Option<Formula> {
         let name = name.trim();
         Some(match name {
@@ -257,6 +547,10 @@ impl Formula {
             "eat3" => Formula::Eat3,
             "chase3" => Formula::Chase3,
             "chasewhite" | "chase" => Formula::ChaseWhite,
+            "agen6" => Formula::AGen6,
+            "atc3" => Formula::ATC3,
+            "ac4" => Formula::AC4,
+            "aus5" => Formula::AUS5,
             _ => {
                 let body = name.strip_prefix("sweep")?;
                 let body = body.trim_start_matches(['(', ':']).trim_end_matches(')');
@@ -499,6 +793,7 @@ impl Formula {
                 }
                 Some(if row.present(S) { mv(F, S) } else { first(row, F, &[F]) })
             }
+            Formula::AGen6 | Formula::ATC3 | Formula::AC4 | Formula::AUS5 => self.numbered(row, k).map(|(a, _)| a),
         }
     }
 }
@@ -509,6 +804,10 @@ pub struct Rule {
     pub table: Map<Row, Action>,
     /// answers rows the table does not list; `None` leaves them undefined
     pub default: Option<Formula>,
+    /// the paper's model (Takahashi et al., Section 2): `stop` ends the run, and
+    /// exploring means every vertex visited and the agent stopped on the start
+    /// vertex.  Off: the classic game, won as soon as every vertex is visited.
+    pub terminating: bool,
 }
 
 pub enum Answer {
@@ -518,6 +817,32 @@ pub enum Answer {
 }
 
 impl Rule {
+    /// The play is over: classic, every vertex is visited; paper model, the agent has stopped.
+    pub fn over(&self, g: &Graph, p: &Pos) -> bool {
+        if self.terminating {
+            p.term
+        } else {
+            p.vis == g.full()
+        }
+    }
+    /// The agent has won: classic, every vertex is visited; paper model, it stopped on the start
+    /// vertex with every vertex visited (Definition 1 of Takahashi et al.).
+    pub fn won(&self, g: &Graph, p: &Pos) -> bool {
+        if self.terminating {
+            p.term && p.cur == g.s && p.vis == g.full()
+        } else {
+            p.vis == g.full()
+        }
+    }
+    /// The paper's rule number behind a default answer (`None` when a table row answers, or the default
+    /// formula has no numbered rules).
+    pub fn rule_number(&self, row: &Row) -> Option<u8> {
+        if self.table.contains_key(row) {
+            None
+        } else {
+            self.default.and_then(|f| f.rule_number(row, self.k))
+        }
+    }
     pub fn answer(&self, row: &Row) -> Answer {
         if let Some(a) = self.table.get(row) {
             return Answer::Table(*a);
@@ -552,6 +877,8 @@ pub struct Trace {
     /// ended by exploring or at an undefined row)
     pub repeat_at: Option<usize>,
     pub unvisited: u32,
+    /// the vertex the agent terminated on (paper model), `None` if it did not stop
+    pub stopped_at: Option<u8>,
 }
 
 pub enum Outcome {
@@ -566,15 +893,21 @@ pub enum Outcome {
     Overflow { positions: usize },
     /// walks only: every walk explored
     Unrefuted { walks: usize },
+    /// play only: the step budget ran out before the play was decided
+    Unfinished { trace: Trace },
 }
 
-fn successors(g: &Graph, p: &Pos, a: Action) -> Vec<(Option<u8>, Pos)> {
+fn successors(g: &Graph, p: &Pos, a: Action, terminating: bool) -> Vec<(Option<u8>, Pos)> {
     let chi = paint(p.chi, p.cur, a.paint);
+    if terminating && a.target == STOP {
+        // the agent paints its vertex and terminates there
+        return vec![(None, Pos { chi, cur: p.cur, vis: p.vis, term: true })];
+    }
     let opts = options(g, p.chi, p.cur, a.target);
     if opts.is_empty() {
-        vec![(None, Pos { chi, cur: p.cur, vis: p.vis })]
+        vec![(None, Pos { chi, cur: p.cur, vis: p.vis, term: false })]
     } else {
-        opts.into_iter().map(|u| (Some(u), Pos { chi, cur: u, vis: p.vis | (1 << u) })).collect()
+        opts.into_iter().map(|u| (Some(u), Pos { chi, cur: u, vis: p.vis | (1 << u), term: false })).collect()
     }
 }
 
@@ -583,7 +916,7 @@ fn successors(g: &Graph, p: &Pos, a: Action) -> Vec<(Option<u8>, Pos)> {
 /// obstruction (the rule explores) or a trapping play (it fails).
 pub fn exact_game(g: &Graph, rule: &Rule, cap: usize) -> Outcome {
     let full = g.full();
-    let root = Pos { chi: 0, cur: g.s, vis: 1 << g.s };
+    let root = Pos { chi: 0, cur: g.s, vis: 1 << g.s, term: false };
     let mut states = vec![root];
     let mut index: Map<Pos, u32> = Map::default();
     index.insert(root, 0);
@@ -593,7 +926,7 @@ pub fn exact_game(g: &Graph, rule: &Rule, cap: usize) -> Outcome {
     let mut i = 0usize;
     while i < states.len() {
         let p = states[i];
-        if p.vis != full {
+        if !rule.over(g, &p) {
             let row = row_at(g, p.chi, p.cur);
             let act = match rule.action(&row) {
                 Some(a) => a,
@@ -615,10 +948,10 @@ pub fn exact_game(g: &Graph, rule: &Rule, cap: usize) -> Outcome {
                         let next = if nxt.cur != q.cur || nxt.vis != q.vis { Some(nxt.cur) } else { None };
                         steps.push(Step { cur: q.cur, row: r, act: a, options: options(g, q.chi, q.cur, a.target), next });
                     }
-                    return Outcome::Undefined { row, path: Trace { steps, repeat_at: None, unvisited: full & !p.vis } };
+                    return Outcome::Undefined { row, path: Trace { steps, repeat_at: None, unvisited: full & !p.vis, stopped_at: None } };
                 }
             };
-            for (_, q) in successors(g, &p, act) {
+            for (_, q) in successors(g, &p, act, rule.terminating) {
                 let j = match index.get(&q) {
                     Some(&j) => j,
                     None => {
@@ -660,7 +993,7 @@ pub fn exact_game(g: &Graph, rule: &Rule, cap: usize) -> Outcome {
     let mut rank = vec![0u32; n];
     let mut queue: Vec<u32> = Vec::new();
     for p in 0..n {
-        if states[p].vis == full {
+        if rule.won(g, &states[p]) {
             win[p] = true;
             queue.push(p as u32);
         }
@@ -689,27 +1022,31 @@ pub fn exact_game(g: &Graph, rule: &Rule, cap: usize) -> Outcome {
     if win[0] {
         let mut steps = Vec::new();
         let mut at = 0u32;
-        while states[at as usize].vis != full {
+        while !rule.over(g, &states[at as usize]) {
             let p = states[at as usize];
             let act = rule.action(&row_at(g, p.chi, p.cur)).unwrap();
-            let (u, j) = successors(g, &p, act).into_iter().map(|(u, q)| (u, index[&q])).max_by_key(|&(_, j)| rank[j as usize]).unwrap();
+            let (u, j) = successors(g, &p, act, rule.terminating).into_iter().map(|(u, q)| (u, index[&q])).max_by_key(|&(_, j)| rank[j as usize]).unwrap();
             steps.push(step_of(&p, u));
             at = j;
         }
-        return Outcome::Explores { positions: n, trace: Trace { steps, repeat_at: None, unvisited: 0 } };
+        let stopped_at = if rule.terminating { Some(states[at as usize].cur) } else { None };
+        return Outcome::Explores { positions: n, trace: Trace { steps, repeat_at: None, unvisited: 0, stopped_at } };
     }
     let mut steps = Vec::new();
     let mut seen: Map<u32, usize> = Map::default();
     let mut at = 0u32;
     let repeat_at = loop {
         if let Some(&s) = seen.get(&at) {
-            break s;
+            break Some(s);
         }
         seen.insert(at, steps.len());
         let p = states[at as usize];
+        if p.term {
+            break None; // the agent stopped where it should not have
+        }
         let act = rule.action(&row_at(g, p.chi, p.cur)).unwrap();
         let mut choice: Option<(Option<u8>, u32)> = None;
-        for (u, q) in successors(g, &p, act) {
+        for (u, q) in successors(g, &p, act, rule.terminating) {
             let j = index[&q];
             if win[j as usize] {
                 continue;
@@ -726,8 +1063,10 @@ pub fn exact_game(g: &Graph, rule: &Rule, cap: usize) -> Outcome {
         steps.push(step_of(&p, u));
         at = j;
     };
-    let unvisited = full & !states[at as usize].vis;
-    Outcome::Fails { positions: n, method: "exact game".into(), trace: Trace { steps, repeat_at: Some(repeat_at), unvisited } }
+    let end = states[at as usize];
+    let unvisited = full & !end.vis;
+    let stopped_at = if end.term { Some(end.cur) } else { None };
+    Outcome::Fails { positions: n, method: "exact game".into(), trace: Trace { steps, repeat_at, unvisited, stopped_at } }
 }
 
 fn frontier_distances(g: &Graph, vis: u32) -> Vec<u32> {
@@ -771,51 +1110,94 @@ pub fn auto_choice(g: &Graph, vis: u32, opts: &[u8]) -> Option<u8> {
 /// seeded random visited target.  `Err` carries an undefined row and the
 /// path that reached it.
 pub fn walk(g: &Graph, rule: &Rule, heuristic: u8, seed: u64, budget: usize) -> Result<Option<Trace>, (Row, Trace)> {
+    let mut rng = seed.max(1);
+    let (end, trace) = play_with(g, rule, budget, |g, p, sucs| {
+        if sucs.len() == 1 {
+            return 0;
+        }
+        let visited: Vec<usize> = (0..sucs.len()).filter(|&i| sucs[i].1.vis == p.vis).collect();
+        let pool: Vec<usize> = if visited.is_empty() { (0..sucs.len()).collect() } else { visited };
+        match heuristic {
+            0 => pool[0],
+            1 => {
+                let d = frontier_distances(g, p.vis);
+                *pool.iter().max_by_key(|&&i| d[sucs[i].1.cur as usize]).unwrap()
+            }
+            2 => *pool.last().unwrap(),
+            _ => {
+                rng ^= rng << 13;
+                rng ^= rng >> 7;
+                rng ^= rng << 17;
+                pool[(rng % pool.len() as u64) as usize]
+            }
+        }
+    });
+    match end {
+        PlayEnd::Won | PlayEnd::Budget => Ok(None),
+        PlayEnd::Lost => Ok(Some(trace)),
+        PlayEnd::Undefined(row) => Err((row, trace)),
+    }
+}
+
+/// How a single play ended.
+enum PlayEnd {
+    /// the agent won (see `Rule::won`)
+    Won,
+    /// it stopped in the wrong place, or the position repeated
+    Lost,
+    /// the rule has no action for this row
+    Undefined(Row),
+    /// the step budget ran out with the play undecided
+    Budget,
+}
+
+/// One execution of `rule` on `g`: `choose` picks among the adversary's options (the successors,
+/// more than one only when several neighbours carry the target colour) and returns an index.
+/// The trace holds every step taken, whatever the end.
+fn play_with(g: &Graph, rule: &Rule, budget: usize, mut choose: impl FnMut(&Graph, &Pos, &[(Option<u8>, Pos)]) -> usize) -> (PlayEnd, Trace) {
     let full = g.full();
-    let mut p = Pos { chi: 0, cur: g.s, vis: 1 << g.s };
+    let mut p = Pos { chi: 0, cur: g.s, vis: 1 << g.s, term: false };
     let mut seen: Map<Pos, usize> = Map::default();
     let mut steps: Vec<Step> = Vec::new();
-    let mut rng = seed.max(1);
-    while steps.len() < budget {
-        if p.vis == full {
-            return Ok(None);
+    loop {
+        let trace = |steps: Vec<Step>, repeat_at: Option<usize>, stopped: bool| Trace { steps, repeat_at, unvisited: full & !p.vis, stopped_at: if stopped { Some(p.cur) } else { None } };
+        if rule.over(g, &p) {
+            let end = if rule.won(g, &p) { PlayEnd::Won } else { PlayEnd::Lost };
+            // over only happens in the paper model, by a stop
+            return (end, trace(steps, None, p.term));
+        }
+        // out of budget: decided only after the position above was looked at
+        if steps.len() >= budget {
+            return (PlayEnd::Budget, trace(steps, None, false));
         }
         if let Some(&s) = seen.get(&p) {
-            return Ok(Some(Trace { steps, repeat_at: Some(s), unvisited: full & !p.vis }));
+            return (PlayEnd::Lost, trace(steps, Some(s), false));
         }
         seen.insert(p, steps.len());
         let row = row_at(g, p.chi, p.cur);
         let act = match rule.action(&row) {
             Some(a) => a,
-            None => return Err((row, Trace { steps, repeat_at: None, unvisited: full & !p.vis })),
+            None => return (PlayEnd::Undefined(row), trace(steps, None, false)),
         };
-        let sucs = successors(g, &p, act);
+        let sucs = successors(g, &p, act, rule.terminating);
         let opts: Vec<u8> = sucs.iter().filter_map(|(u, _)| *u).collect();
-        let pick = if sucs.len() == 1 {
-            0
-        } else {
-            let visited: Vec<usize> = (0..sucs.len()).filter(|&i| sucs[i].1.vis == p.vis).collect();
-            let pool: Vec<usize> = if visited.is_empty() { (0..sucs.len()).collect() } else { visited };
-            match heuristic {
-                0 => pool[0],
-                1 => {
-                    let d = frontier_distances(g, p.vis);
-                    *pool.iter().max_by_key(|&&i| d[sucs[i].1.cur as usize]).unwrap()
-                }
-                2 => *pool.last().unwrap(),
-                _ => {
-                    rng ^= rng << 13;
-                    rng ^= rng >> 7;
-                    rng ^= rng << 17;
-                    pool[(rng % pool.len() as u64) as usize]
-                }
-            }
-        };
-        let (u, q) = sucs[pick];
+        let (u, q) = sucs[choose(g, &p, &sucs)];
         steps.push(Step { cur: p.cur, row, act, options: opts, next: u });
         p = q;
     }
-    Ok(None)
+}
+
+/// One play under an adversary that prefers the vertices in `pref`, in that order (a vertex
+/// not listed comes last, the smaller number first).  Reproduces a hand trace.
+pub fn play(g: &Graph, rule: &Rule, pref: &[u8], budget: usize) -> Outcome {
+    let rank = |u: u8| pref.iter().position(|&x| x == u).unwrap_or(usize::MAX);
+    let (end, trace) = play_with(g, rule, budget, |_, _, sucs| (0..sucs.len()).min_by_key(|&i| sucs[i].0.map_or(usize::MAX, rank)).unwrap());
+    match end {
+        PlayEnd::Won => Outcome::Explores { positions: 0, trace },
+        PlayEnd::Lost => Outcome::Fails { positions: 0, method: format!("play: adversary prefers {}", if pref.is_empty() { "the smallest vertex".to_string() } else { pref.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(" ") }), trace },
+        PlayEnd::Undefined(row) => Outcome::Undefined { row, path: trace },
+        PlayEnd::Budget => Outcome::Unfinished { trace },
+    }
 }
 
 pub fn walks(g: &Graph, rule: &Rule, random: usize, budget: usize) -> Outcome {
@@ -862,9 +1244,16 @@ fn mask_list(m: u32) -> String {
 fn target_json(t: u8) -> String {
     if t == STAY {
         "-1".into()
+    } else if t == STOP {
+        "-2".into()
     } else {
         t.to_string()
     }
+}
+/// `,"rule":N` for an answer that comes from a numbered rule of the paper, else nothing (so the answers
+/// of the other rules keep their shape).
+fn rule_json(rule: Option<u8>) -> String {
+    rule.map_or(String::new(), |n| format!(",\"rule\":{}", n))
 }
 fn trace_json(t: &Trace, k: u8) -> String {
     let steps: Vec<String> = t
@@ -872,15 +1261,39 @@ fn trace_json(t: &Trace, k: u8) -> String {
         .iter()
         .map(|s| format!("{{\"cur\":{},\"row\":{},\"paint\":{},\"target\":{},\"options\":{},\"next\":{}}}", s.cur, js(&s.row.text(k)), s.act.paint, target_json(s.act.target), list(&s.options), s.next.map_or("null".to_string(), |u| u.to_string())))
         .collect();
-    format!("{{\"repeat_at\":{},\"unvisited\":{},\"steps\":[{}]}}", t.repeat_at.map_or("null".to_string(), |r| r.to_string()), mask_list(t.unvisited), steps.join(","))
+    format!("{{\"repeat_at\":{},\"unvisited\":{},\"stopped_at\":{},\"steps\":[{}]}}", t.repeat_at.map_or("null".to_string(), |r| r.to_string()), mask_list(t.unvisited), t.stopped_at.map_or("null".to_string(), |v| v.to_string()), steps.join(","))
 }
-fn outcome_json(o: &Outcome, k: u8) -> String {
+/// Why a play ended badly in the paper model.
+fn fail_reason(t: &Trace) -> &'static str {
+    match t.stopped_at {
+        None => "never_stops",
+        Some(_) if t.unvisited != 0 => "stopped_early",
+        // a stop on the start vertex with every vertex visited is a win, so it is never a failure
+        Some(_) => "stopped_off_start",
+    }
+}
+/// Paper model: the three parts of exploring, reported separately.
+fn indicators(t: &Trace, start: u8) -> String {
+    format!("{{\"visited_all\":{},\"stopped\":{},\"stopped_at_start\":{}}}", t.unvisited == 0, t.stopped_at.is_some(), t.stopped_at == Some(start))
+}
+/// `paper`: the outcome is for the paper's model, which adds `model`, and for a trace also
+/// `indicators` and (for a failure) `reason`.
+fn outcome_json(o: &Outcome, k: u8, paper: bool, start: u8) -> String {
+    let model = format!("\"model\":\"{}\"", if paper { "paper" } else { "classic" });
+    let extra = |t: &Trace, fails: bool| -> String {
+        if !paper {
+            return String::new();
+        }
+        let reason = if fails { format!(",\"reason\":\"{}\"", fail_reason(t)) } else { String::new() };
+        format!(",\"indicators\":{}{}", indicators(t, start), reason)
+    };
     match o {
-        Outcome::Explores { positions, trace } => format!("{{\"status\":\"explores\",\"positions\":{},\"trace\":{}}}", positions, trace_json(trace, k)),
-        Outcome::Fails { positions, method, trace } => format!("{{\"status\":\"fails\",\"positions\":{},\"method\":{},\"trace\":{}}}", positions, js(method), trace_json(trace, k)),
-        Outcome::Undefined { row, path } => format!("{{\"status\":\"undefined\",\"row\":{},\"path\":{}}}", js(&row.text(k)), trace_json(path, k)),
-        Outcome::Overflow { positions } => format!("{{\"status\":\"overflow\",\"positions\":{}}}", positions),
-        Outcome::Unrefuted { walks } => format!("{{\"status\":\"unrefuted\",\"walks\":{}}}", walks),
+        Outcome::Explores { positions, trace } => format!("{{\"status\":\"explores\",{},\"positions\":{}{},\"trace\":{}}}", model, positions, extra(trace, false), trace_json(trace, k)),
+        Outcome::Fails { positions, method, trace } => format!("{{\"status\":\"fails\",{},\"positions\":{},\"method\":{}{},\"trace\":{}}}", model, positions, js(method), extra(trace, true), trace_json(trace, k)),
+        Outcome::Undefined { row, path } => format!("{{\"status\":\"undefined\",{},\"row\":{},\"path\":{}}}", model, js(&row.text(k)), trace_json(path, k)),
+        Outcome::Overflow { positions } => format!("{{\"status\":\"overflow\",{},\"positions\":{}}}", model, positions),
+        Outcome::Unrefuted { walks } => format!("{{\"status\":\"unrefuted\",{},\"walks\":{}}}", model, walks),
+        Outcome::Unfinished { trace } => format!("{{\"status\":\"unfinished\",{},\"trace\":{}}}", model, trace_json(trace, k)),
     }
 }
 fn err(msg: &str) -> String {
@@ -888,10 +1301,12 @@ fn err(msg: &str) -> String {
 }
 
 // ------------------------------------------------------------------ the request protocol
-/// Lines of `key value`.  Keys: `cmd` (`step`, `exact`, `walks`, `answer`),
+/// Lines of `key value`.  Keys: `cmd` (`step`, `exact`, `walks`, `play`, `answer`),
 /// `k`, `graph` (`n s u-v,...`), `default` (a formula name), `cap`, `walks`,
 /// `budget`, `colours` (space-separated, for `step`), `cur`, `vis`
-/// (space-separated visited vertices), `row` (for `answer`); the block
+/// (space-separated visited vertices), `row` (for `answer`), `model`
+/// (`classic` or `paper`; default `classic`, or `paper` when the default rule
+/// is one of the papers' algorithms: `agen6`, `atc3`, `ac4`, `aus5`); the block
 /// between a line `table` and a line `end` lists `row action` pairs.
 struct Request {
     cmd: String,
@@ -908,10 +1323,20 @@ struct Request {
     cur: Option<u8>,
     vis: Vec<u8>,
     row: Option<String>,
+    model: String,
+    prefer: Vec<u8>,
+    bad_prefer: Vec<String>,
+    /// `agents 1` (default) or `agents 2`; anything else is an error
+    agents: Option<u8>,
+    /// the name after `default`, as written (two agents have one built-in rule that is not a `Formula`)
+    default_raw: String,
+    /// two agents: the second agent's vertex, and one stopped flag per agent
+    cur2: Option<u8>,
+    term: Vec<u8>,
 }
 
 fn parse_request(input: &str) -> Request {
-    let mut r = Request { cmd: String::new(), k: 5, graph: None, table: Map::default(), bad_rows: Vec::new(), default: None, bad_default: None, cap: 1_000_000, walks: 64, budget: 200_000, colours: Vec::new(), cur: None, vis: Vec::new(), row: None };
+    let mut r = Request { cmd: String::new(), k: 5, graph: None, table: Map::default(), bad_rows: Vec::new(), default: None, bad_default: None, cap: 1_000_000, walks: 64, budget: 200_000, colours: Vec::new(), cur: None, vis: Vec::new(), row: None, model: String::new(), prefer: Vec::new(), bad_prefer: Vec::new(), agents: Some(1), default_raw: String::new(), cur2: None, term: Vec::new() };
     let mut in_table = false;
     for line in input.lines() {
         let line = line.trim();
@@ -923,9 +1348,11 @@ fn parse_request(input: &str) -> Request {
                 in_table = false;
                 continue;
             }
+            // exactly two tokens, `own.bag paint>target`: a third would be dropped without a word
             let mut it = line.split_whitespace();
-            match (it.next().and_then(Row::parse), it.next().and_then(Action::parse)) {
-                (Some(row), Some(act)) => {
+            let (row, act, extra) = (it.next(), it.next(), it.next());
+            match (row.and_then(Row::parse), act.and_then(Action::parse), extra) {
+                (Some(row), Some(act), None) => {
                     r.table.insert(row, act);
                 }
                 _ => r.bad_rows.push(line.to_string()),
@@ -940,7 +1367,11 @@ fn parse_request(input: &str) -> Request {
             "cmd" => r.cmd = val.to_string(),
             "k" => r.k = val.parse().unwrap_or(5),
             "graph" => r.graph = Some(Graph::parse(val)),
+            "agents" => r.agents = val.parse::<u8>().ok().filter(|&a| a == 1 || a == 2),
+            "cur2" => r.cur2 = val.parse().ok(),
+            "term" => r.term = val.split_whitespace().filter_map(|x| x.parse().ok()).collect(),
             "default" => {
+                r.default_raw = val.to_string();
                 if val.is_empty() || val == "none" {
                     r.default = None;
                 } else {
@@ -957,6 +1388,17 @@ fn parse_request(input: &str) -> Request {
             "cur" => r.cur = val.parse().ok(),
             "vis" => r.vis = val.split_whitespace().filter_map(|x| x.parse().ok()).collect(),
             "row" => r.row = Some(val.to_string()),
+            "model" => r.model = val.to_string(),
+            "prefer" => {
+                // a later `prefer` line replaces an earlier one; a token that is not a vertex number is an error
+                r.prefer.clear();
+                for tok in val.split_whitespace() {
+                    match tok.parse::<u8>() {
+                        Ok(v) => r.prefer.push(v),
+                        Err(_) => r.bad_prefer.push(tok.to_string()),
+                    }
+                }
+            }
             "table" => in_table = true,
             _ => {}
         }
@@ -964,29 +1406,60 @@ fn parse_request(input: &str) -> Request {
     r
 }
 
+/// Whether the request runs the paper's model (see `Rule::terminating`).
+/// With no `model` key it is the paper model whenever the rule can stop (`default agen6` or another
+/// algorithm of the papers, or a table row answering `stop`): judged as the classic game a stop would silently mean
+/// "stay" and the verdict would ignore where, or whether, the agent stops.
+fn resolve_model(model: &str, default: &Option<Formula>, table_can_stop: bool) -> Result<bool, String> {
+    match model {
+        "paper" => Ok(true),
+        "classic" => Ok(false),
+        "" => Ok(table_can_stop || default.as_ref().map_or(false, |f| f.paper_algorithm().is_some())),
+        other => Err(format!("unknown model {} (classic or paper)", other)),
+    }
+}
+
 pub fn handle(input: &str) -> String {
     let r = parse_request(input);
     if !(2..=MAXK as u8).contains(&r.k) {
         return err(&format!("k must be between 2 and {}", MAXK));
     }
+    match r.agents {
+        None => return err("agents must be 1 or 2"),
+        Some(2) => return two::handle(&r),
+        _ => {}
+    }
     if let Some(bad) = &r.bad_default {
         return err(&format!("unknown default rule {}", bad));
+    }
+    if let Some((name, need)) = r.default.as_ref().and_then(|f| f.paper_algorithm()) {
+        if r.k < need {
+            return err(&format!("{} needs {} colours (k {})", name, need, need));
+        }
     }
     if !r.bad_rows.is_empty() {
         return err(&format!("bad table line: {}", r.bad_rows[0]));
     }
+    if let Some(tok) = r.bad_prefer.first() {
+        return err(&format!("prefer: {} is not a vertex number", tok));
+    }
     for (row, act) in &r.table {
-        if row.own >= r.k || act.paint >= r.k || (act.target != STAY && act.target >= r.k) || row.cnt[r.k as usize..].iter().any(|&c| c > 0) {
+        if row.own >= r.k || act.paint >= r.k || (act.target != STAY && act.target != STOP && act.target >= r.k) || row.cnt[r.k as usize..].iter().any(|&c| c > 0) {
             return err(&format!("table entry {} {} uses a colour outside 0..{}", row.text(r.k), act.text(), r.k - 1));
         }
     }
-    let rule = Rule { k: r.k, table: r.table, default: r.default };
+    let table_can_stop = r.table.values().any(|a| a.target == STOP);
+    let terminating = match resolve_model(&r.model, &r.default, table_can_stop) {
+        Ok(t) => t,
+        Err(e) => return err(&e),
+    };
+    let rule = Rule { k: r.k, table: r.table, default: r.default, terminating };
     if r.cmd == "answer" {
         // the rule's answer on one row, for the rule editor
         let Some(text) = r.row.as_deref().and_then(Row::parse) else { return err("row: expected own.bag") };
         return match rule.answer(&text) {
             Answer::Table(a) => format!("{{\"status\":\"ok\",\"defined\":true,\"source\":\"table\",\"paint\":{},\"target\":{}}}", a.paint, target_json(a.target)),
-            Answer::Default(a) => format!("{{\"status\":\"ok\",\"defined\":true,\"source\":\"default\",\"paint\":{},\"target\":{}}}", a.paint, target_json(a.target)),
+            Answer::Default(a) => format!("{{\"status\":\"ok\",\"defined\":true,\"source\":\"default\",\"paint\":{},\"target\":{}{}}}", a.paint, target_json(a.target), rule_json(rule.rule_number(&text))),
             Answer::Undefined => "{\"status\":\"ok\",\"defined\":false}".to_string(),
         };
     }
@@ -1020,13 +1493,20 @@ pub fn handle(input: &str) -> String {
             };
             let opts = options(&g, chi, cur, a.target);
             let auto = auto_choice(&g, vis, &opts);
-            format!("{{\"status\":\"ok\",\"row\":{},\"degree\":{},\"defined\":true,\"source\":\"{}\",\"paint\":{},\"target\":{},\"options\":{},\"auto\":{},\"explored\":{}}}", js(&row.text(r.k)), row.degree(), source, a.paint, target_json(a.target), list(&opts), auto.map_or("null".to_string(), |u| u.to_string()), vis == g.full())
+            format!("{{\"status\":\"ok\",\"row\":{},\"degree\":{},\"defined\":true,\"source\":\"{}\",\"paint\":{},\"target\":{},\"options\":{},\"auto\":{},\"explored\":{}{}}}", js(&row.text(r.k)), row.degree(), source, a.paint, target_json(a.target), list(&opts), auto.map_or("null".to_string(), |u| u.to_string()), vis == g.full(), rule_json(rule.rule_number(&row)))
         }
         "exact" => {
             let cap = r.cap.clamp(1_000, 12_000_000);
-            outcome_json(&exact_game(&g, &rule, cap), r.k)
+            outcome_json(&exact_game(&g, &rule, cap), r.k, rule.terminating, g.s)
         }
-        "walks" => outcome_json(&walks(&g, &rule, r.walks.min(100_000), r.budget.clamp(10, 5_000_000)), r.k),
+        "walks" => outcome_json(&walks(&g, &rule, r.walks.min(100_000), r.budget.clamp(10, 5_000_000)), r.k, rule.terminating, g.s),
+        "play" => {
+            // one execution under an adversary with a stated preference order (`prefer v1 v2 ...`)
+            if let Some(&bad) = r.prefer.iter().find(|&&v| v >= g.n) {
+                return err(&format!("prefer: vertex {} is not in the graph (0..{})", bad, g.n - 1));
+            }
+            outcome_json(&play(&g, &rule, &r.prefer, r.budget.clamp(10, 5_000_000)), r.k, rule.terminating, g.s)
+        }
         other => err(&format!("unknown cmd {}", other)),
     }
 }
@@ -1067,6 +1547,11 @@ pub unsafe extern "C" fn free_result(ptr: *mut u8) {
     drop(Vec::from_raw_parts(ptr, 0, n + 4));
 }
 
+mod joint;
+#[cfg(test)]
+mod paper_tests;
+mod two;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1074,7 +1559,7 @@ mod tests {
     const SKETCH1: &str = "17 0 0-1,1-2,0-2,0-3,2-3,0-4,4-5,3-6,4-6,5-6,5-7,6-8,7-8,5-9,9-14,9-15,9-10,10-16,5-10,9-11,10-11,5-11,7-11,11-12,11-13,12-13";
 
     fn rule(k: u8, f: &str) -> Rule {
-        Rule { k, table: Map::default(), default: Formula::parse(f) }
+        Rule { k, table: Map::default(), default: Formula::parse(f), terminating: false }
     }
 
     #[test]
@@ -1094,6 +1579,607 @@ mod tests {
             }
             _ => panic!("flipsweep5d must fail on Sketch I"),
         }
+    }
+
+    #[test]
+    fn stop_action_parses_prints_and_validates() {
+        let a = Action::parse("2>stop").unwrap();
+        assert_eq!(a, Action { paint: 2, target: STOP });
+        assert_eq!(a.text(), "2>stop");
+        assert_eq!(Action::parse("3>stay").unwrap().text(), "3>stay");
+        assert_eq!(Action::parse("3>7").unwrap().target, 7);
+        // the numeric codes of the two special targets are not colours
+        assert_eq!(Action::parse("2>254"), None);
+        assert_eq!(Action::parse("2>255"), None);
+        assert_eq!(Action::parse("2>5").unwrap().target, 5);
+        assert_eq!(Action::parse("2>s").unwrap().target, STAY);
+        // a table row may answer `stop` (not rejected as an out-of-range colour); the answer reports target -2
+        let out = handle("cmd answer\nk 6\nrow 4.000000\ntable\n4.000000 2>stop\nend\n");
+        assert!(out.contains("\"defined\":true") && out.contains("\"paint\":2") && out.contains("\"target\":-2"), "{}", out);
+        // the adversary is never offered a move for stop
+        assert!(options(&Graph::parse("2 0 0-1").unwrap(), 0, 0, STOP).is_empty());
+    }
+
+    // (row read, action taken) at each step, from workbench/notes/agen6-hand-trace.xlsx
+    const PATH_TRACE: [(&str, &str); 17] = [
+        ("0.100000", "3>stay"), ("3.100000", "3>0"), ("0.100100", "3>3"), ("3.000100", "4>stay"),
+        ("4.000100", "1>3"), ("3.110000", "3>0"), ("0.000100", "3>3"), ("3.010100", "4>stay"),
+        ("4.010100", "1>3"), ("3.010000", "4>stay"), ("4.010000", "2>1"), ("1.011000", "3>stay"),
+        ("3.011000", "4>stay"), ("4.011000", "2>1"), ("1.001000", "3>stay"), ("3.001000", "4>stay"),
+        ("4.001000", "2>stop"),
+    ];
+
+    // (row read, action taken) at each step, from workbench/notes/agen6-hand-trace.xlsx
+    const TRIANGLE_TRACE: [(&str, &str); 21] = [
+        ("0.200000", "3>stay"), ("3.200000", "3>0"), ("0.100100", "3>3"), ("3.100100", "4>stay"),
+        ("4.100100", "1>3"), ("3.110000", "3>0"), ("0.010100", "5>3"), ("3.010001", "4>stay"),
+        ("4.010001", "4>5"), ("5.010010", "0>4"), ("4.110000", "2>1"), ("1.101000", "3>stay"),
+        ("3.101000", "3>0"), ("0.001100", "3>3"), ("3.001100", "4>stay"), ("4.001100", "1>3"),
+        ("3.011000", "4>stay"), ("4.011000", "2>1"), ("1.002000", "3>stay"), ("3.002000", "4>stay"),
+        ("4.002000", "2>stop"),
+    ];
+
+    // (row read, action taken) at each step, from workbench/notes/agen6-hand-trace.xlsx
+    const TREE_TRACE: [(&str, &str); 24] = [
+        ("0.200000", "3>stay"), ("3.200000", "3>0"), ("0.100100", "3>3"), ("3.100100", "4>stay"),
+        ("4.100100", "1>3"), ("3.110000", "3>0"), ("0.000100", "3>3"), ("3.010100", "4>stay"),
+        ("4.010100", "1>3"), ("3.010000", "4>stay"), ("4.010000", "2>1"), ("1.011000", "3>stay"),
+        ("3.011000", "4>stay"), ("4.011000", "2>1"), ("1.101000", "3>stay"), ("3.101000", "3>0"),
+        ("0.000100", "3>3"), ("3.001100", "4>stay"), ("4.001100", "1>3"), ("3.010000", "4>stay"),
+        ("4.010000", "2>1"), ("1.002000", "3>stay"), ("3.002000", "4>stay"), ("4.002000", "2>stop"),
+    ];
+
+    /// Runs A_Gen6 the way the paper's model says, one action at a time, and
+    /// returns the (row, action) log, the final colouring and the final vertex.
+    /// `pref` lists the vertices in the adversary's order of preference.
+    fn run_agen6(g: &Graph, pref: &[u8]) -> (Vec<(String, String)>, u128, u8) {
+        let f = Formula::AGen6;
+        let (mut chi, mut cur) = (0u128, g.s);
+        let mut log = Vec::new();
+        for _ in 0..1000 {
+            let row = row_at(g, chi, cur);
+            let act = f.action(&row, 6).expect("A_Gen6 has no rule for this row");
+            log.push((row.text(6), act.text()));
+            let opts = options(g, chi, cur, act.target);
+            chi = paint(chi, cur, act.paint);
+            if act.target == STOP {
+                return (log, chi, cur);
+            }
+            if act.target != STAY {
+                assert!(!opts.is_empty(), "A_Gen6 targeted a colour no neighbour has");
+                cur = *opts.iter().min_by_key(|u| pref.iter().position(|p| p == *u).unwrap()).unwrap();
+            }
+        }
+        panic!("A_Gen6 did not stop");
+    }
+
+    fn all_fin_at_start(g: &Graph, chi: u128, cur: u8) {
+        assert_eq!(cur, g.s, "must stop on the start vertex");
+        for v in 0..g.n {
+            assert_eq!(colour(chi, v), 2, "vertex {} is not fin", v);
+        }
+    }
+
+    fn check_trace(g: &Graph, pref: &[u8], expected: &[(&str, &str)]) {
+        let (log, chi, cur) = run_agen6(g, pref);
+        let got: Vec<(&str, &str)> = log.iter().map(|(a, b)| (a.as_str(), b.as_str())).collect();
+        assert_eq!(got, expected);
+        all_fin_at_start(g, chi, cur);
+    }
+
+    #[test]
+    fn agen6_reproduces_the_hand_traces() {
+        check_trace(&Graph::parse("3 0 0-1,1-2").unwrap(), &[0, 1, 2], &PATH_TRACE);
+        check_trace(&Graph::parse("3 0 0-1,1-2,0-2").unwrap(), &[0, 1, 2], &TRIANGLE_TRACE);
+        check_trace(&Graph::parse("4 0 0-1,0-2,1-3").unwrap(), &[1, 2, 3, 0], &TREE_TRACE);
+    }
+
+    #[test]
+    fn agen6_finishes_the_tree_under_the_other_tie_choice() {
+        let g = Graph::parse("4 0 0-1,0-2,1-3").unwrap();
+        let (log, chi, cur) = run_agen6(&g, &[2, 1, 3, 0]);
+        assert_eq!(log.len(), 24);
+        all_fin_at_start(&g, chi, cur);
+    }
+
+    #[test]
+    fn agen6_rules_priority_and_gaps() {
+        let ans = |k: u8, row: &str| handle(&format!("cmd answer\nk {}\nrow {}\ndefault agen6\n", k, row));
+        // rule 3 (start vertex), rule 1 before rule 2, rule 4 and 5, rule 9
+        assert!(ans(6, "0.100000").contains("\"paint\":3,\"target\":-1"));
+        assert!(ans(6, "0.010100").contains("\"paint\":5,\"target\":3"));
+        assert!(ans(6, "3.100000").contains("\"paint\":3,\"target\":0"));
+        assert!(ans(6, "3.110100").contains("\"paint\":4,\"target\":-1"));
+        assert!(ans(6, "4.001000").contains("\"paint\":2,\"target\":-2"));
+        // rule 6 before rule 7 before rule 8
+        assert!(ans(6, "4.010101").contains("\"paint\":4,\"target\":5"));
+        assert!(ans(6, "4.010100").contains("\"paint\":1,\"target\":3"));
+        // the paper defines no rule for fin; A_Gen6 with fewer than six colours is an error
+        assert!(ans(6, "2.000000").contains("\"defined\":false"));
+        assert!(ans(5, "0.10000").contains("6 colours"), "A_Gen6 needs six colours: an error, not an undefined row");
+    }
+
+    fn paper_rule_from_table(k: u8, rows: &[(&str, &str)]) -> Rule {
+        let mut table = Map::default();
+        for (r, a) in rows {
+            table.insert(Row::parse(r).unwrap(), Action::parse(a).unwrap());
+        }
+        Rule { k, table, default: None, terminating: true }
+    }
+
+    #[test]
+    fn exact_game_explores_with_agen6_from_every_start() {
+        let rule = Rule { k: 6, table: Map::default(), default: Some(Formula::AGen6), terminating: true };
+        for (name, n, edges) in [("path", 3u8, "0-1,1-2"), ("triangle", 3, "0-1,1-2,0-2"), ("tree", 4, "0-1,0-2,1-3")] {
+            for start in 0..n {
+                let g = Graph::parse(&format!("{} {} {}", n, start, edges)).unwrap();
+                match exact_game(&g, &rule, 1_000_000) {
+                    Outcome::Explores { trace, .. } => {
+                        assert_eq!(trace.stopped_at, Some(start), "{} from {} must stop on the start", name, start);
+                        assert_eq!(trace.unvisited, 0);
+                        assert_eq!(trace.steps.last().unwrap().act.target, STOP);
+                    }
+                    _ => panic!("A_Gen6 must explore the {} from vertex {}", name, start),
+                }
+            }
+        }
+        // the path from its end vertex has no choice for the adversary: 17 actions, as in the hand trace
+        let g = Graph::parse("3 0 0-1,1-2").unwrap();
+        match exact_game(&g, &rule, 1_000_000) {
+            Outcome::Explores { trace, .. } => assert_eq!(trace.steps.len(), 17),
+            _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn paper_model_wants_a_stop_where_the_classic_game_does_not() {
+        // sigma* visits every vertex of a short path but never stops
+        let g = Graph::parse("4 0 0-1,1-2,2-3").unwrap();
+        let mut r = rule(5, "sigma");
+        assert!(matches!(exact_game(&g, &r, 100_000), Outcome::Explores { .. }));
+        r.terminating = true;
+        match exact_game(&g, &r, 100_000) {
+            Outcome::Fails { trace, .. } => {
+                assert!(trace.repeat_at.is_some(), "it circles forever");
+                assert_eq!(trace.stopped_at, None);
+            }
+            _ => panic!("a rule that never stops cannot explore in the paper model"),
+        }
+    }
+
+    #[test]
+    fn a_stop_off_the_start_vertex_is_a_failure() {
+        // two vertices: the agent walks to vertex 1, visits everything, and stops there
+        let g = Graph::parse("2 0 0-1").unwrap();
+        let r = paper_rule_from_table(2, &[("0.10", "1>0"), ("0.01", "0>stop")]);
+        match exact_game(&g, &r, 1000) {
+            Outcome::Fails { trace, .. } => {
+                assert_eq!(trace.stopped_at, Some(1));
+                assert_eq!(trace.unvisited, 0, "every vertex was visited, but it stopped in the wrong place");
+                assert_eq!(trace.repeat_at, None);
+            }
+            _ => panic!("stopping away from the start must fail"),
+        }
+    }
+
+    #[test]
+    fn a_stop_before_every_vertex_is_visited_is_a_failure() {
+        let g = Graph::parse("2 0 0-1").unwrap();
+        let r = paper_rule_from_table(2, &[("0.10", "1>stop")]);
+        match exact_game(&g, &r, 1000) {
+            Outcome::Fails { trace, .. } => {
+                assert_eq!(trace.stopped_at, Some(0));
+                assert_eq!(trace.unvisited, 1 << 1);
+            }
+            _ => panic!("stopping early must fail"),
+        }
+    }
+
+    #[test]
+    fn a_rule_that_returns_and_stops_on_the_start_explores() {
+        // vertex 0 -> 1 (paints 0 white->1), vertex 1 sends the agent back, vertex 0 stops
+        let g = Graph::parse("2 0 0-1").unwrap();
+        let r = paper_rule_from_table(2, &[("0.10", "1>0"), ("0.01", "0>1"), ("1.10", "1>stop")]);
+        match exact_game(&g, &r, 1000) {
+            Outcome::Explores { trace, .. } => {
+                assert_eq!(trace.stopped_at, Some(0));
+                assert_eq!(trace.steps.len(), 3);
+            }
+            _ => panic!("visiting everything and stopping on the start must explore"),
+        }
+    }
+
+    #[test]
+    fn walks_use_the_paper_win_condition_too() {
+        let a6 = Rule { k: 6, table: Map::default(), default: Some(Formula::AGen6), terminating: true };
+        for (n, edges) in [(3u8, "0-1,1-2"), (3, "0-1,1-2,0-2"), (4, "0-1,0-2,1-3")] {
+            let g = Graph::parse(&format!("{} 0 {}", n, edges)).unwrap();
+            assert!(matches!(walks(&g, &a6, 8, 10_000), Outcome::Unrefuted { .. }), "A_Gen6 survives every walk on {}", edges);
+        }
+        // a stop away from the start is caught by a walk
+        let g = Graph::parse("2 0 0-1").unwrap();
+        let wrong = paper_rule_from_table(2, &[("0.10", "1>0"), ("0.01", "0>stop")]);
+        match walks(&g, &wrong, 2, 1000) {
+            Outcome::Fails { trace, .. } => {
+                assert_eq!(trace.stopped_at, Some(1));
+                assert_eq!(trace.repeat_at, None);
+            }
+            _ => panic!("the walk must see the stop on vertex 1"),
+        }
+        // a rule that never stops is caught by a repeat
+        let g = Graph::parse("4 0 0-1,1-2,2-3").unwrap();
+        let mut sigma = rule(5, "sigma");
+        assert!(matches!(walks(&g, &sigma, 2, 10_000), Outcome::Unrefuted { .. }), "classic: it visits everything");
+        sigma.terminating = true;
+        assert!(matches!(walks(&g, &sigma, 2, 10_000), Outcome::Fails { .. }), "paper model: it never stops");
+    }
+
+    #[test]
+    fn results_report_the_paper_conditions_separately() {
+        // A_Gen6 explores: stopped on the start, everything visited
+        let out = handle("cmd exact\nk 6\ngraph 3 0 0-1,1-2\ndefault agen6\n");
+        assert!(out.contains("\"status\":\"explores\"") && out.contains("\"model\":\"paper\""), "{}", out);
+        assert!(out.contains("\"indicators\":{\"visited_all\":true,\"stopped\":true,\"stopped_at_start\":true}"), "{}", out);
+        assert!(out.contains("\"stopped_at\":0"), "{}", out);
+        // visits everything but stops on the wrong vertex
+        let off = handle("cmd exact\nk 2\nmodel paper\ngraph 2 0 0-1\ntable\n0.10 1>0\n0.01 0>stop\nend\n");
+        assert!(off.contains("\"reason\":\"stopped_off_start\""), "{}", off);
+        assert!(off.contains("\"indicators\":{\"visited_all\":true,\"stopped\":true,\"stopped_at_start\":false}"), "{}", off);
+        // stops before visiting everything
+        let early = handle("cmd exact\nk 2\nmodel paper\ngraph 2 0 0-1\ntable\n0.10 1>stop\nend\n");
+        assert!(early.contains("\"reason\":\"stopped_early\"") && early.contains("\"visited_all\":false"), "{}", early);
+        // never stops
+        let never = handle("cmd exact\nk 5\nmodel paper\ngraph 4 0 0-1,1-2,2-3\ndefault sigma\n");
+        assert!(never.contains("\"reason\":\"never_stops\"") && never.contains("\"stopped\":false"), "{}", never);
+        // a walk reports the same way
+        let walk = handle("cmd walks\nk 2\nmodel paper\ngraph 2 0 0-1\ntable\n0.10 1>0\n0.01 0>stop\nend\n");
+        assert!(walk.contains("\"reason\":\"stopped_off_start\""), "{}", walk);
+        // the classic answer keeps its shape: no indicators, no reason
+        let classic = handle("cmd exact\nk 5\ngraph 4 0 0-1,1-2,2-3\ndefault sigma\n");
+        assert!(classic.contains("\"model\":\"classic\"") && !classic.contains("indicators") && !classic.contains("reason"), "{}", classic);
+    }
+
+    #[test]
+    fn paper_algorithms_match_the_page_templates() {
+        // testdata/NAME_rows_deg4.txt is produced by the page's JavaScript template of each algorithm
+        // (`node testdata/check_paper_templates.mjs --write`): every row up to degree 4 with the algorithm's colours,
+        // its action and the number of the paper's rule, or `undefined`.  The engine must give the same, row for row.
+        fn bags(c: usize, k: usize, left: u8, cnt: &mut [u8; MAXK], out: &mut Vec<[u8; MAXK]>) {
+            if c == k {
+                if cnt.iter().sum::<u8>() >= 1 {
+                    out.push(*cnt);
+                }
+                return;
+            }
+            for x in 0..=left {
+                cnt[c] = x;
+                bags(c + 1, k, left - x, cnt, out);
+            }
+            cnt[c] = 0;
+        }
+        let fixtures: [(Formula, &str); 4] = [
+            (Formula::AGen6, include_str!("../testdata/agen6_rows_deg4.txt")),
+            (Formula::ATC3, include_str!("../testdata/atc3_rows_deg4.txt")),
+            (Formula::AC4, include_str!("../testdata/ac4_rows_deg4.txt")),
+            (Formula::AUS5, include_str!("../testdata/aus5_rows_deg4.txt")),
+        ];
+        for (f, text) in fixtures {
+            let (name, k) = f.paper_algorithm().unwrap();
+            let mut all = Vec::new();
+            bags(0, k as usize, 4, &mut [0; MAXK], &mut all);
+            let mut lines = Vec::new();
+            for own in 0..k {
+                for cnt in &all {
+                    let row = Row { own, cnt: *cnt };
+                    lines.push(match f.action(&row, k) {
+                        Some(a) => format!("{} {} r{}", row.text(k), a.text(), f.rule_number(&row, k).unwrap()),
+                        None => format!("{} undefined", row.text(k)),
+                    });
+                }
+            }
+            lines.sort();
+            let fixture: Vec<&str> = text.lines().collect();
+            assert_eq!(lines.len(), fixture.len(), "{}: the number of rows", name);
+            for (mine, theirs) in lines.iter().zip(&fixture) {
+                assert_eq!(mine, theirs, "{}", name);
+            }
+        }
+    }
+
+    #[test]
+    fn a_walk_judges_the_position_it_ends_on_even_when_the_budget_runs_out() {
+        // the wrong stop (on vertex 1) is the position reached after exactly 2 actions
+        let g = Graph::parse("2 0 0-1").unwrap();
+        let wrong = paper_rule_from_table(2, &[("0.10", "1>0"), ("0.01", "0>stop")]);
+        for budget in [2, 3, 10] {
+            match walk(&g, &wrong, 0, 0, budget) {
+                Ok(Some(trace)) => assert_eq!(trace.stopped_at, Some(1), "budget {}", budget),
+                _ => panic!("budget {}: the wrong stop must be reported", budget),
+            }
+        }
+        // a correct stop on the last budgeted step is still an exploration
+        let good = paper_rule_from_table(2, &[("0.10", "1>0"), ("0.01", "0>1"), ("1.10", "1>stop")]);
+        assert!(matches!(walk(&g, &good, 0, 0, 3), Ok(None)));
+        // running out of budget before anything is decided is not a verdict
+        assert!(matches!(walk(&g, &good, 0, 0, 1), Ok(None)));
+    }
+
+    #[test]
+    fn a_table_that_can_stop_is_judged_by_the_paper_model_without_being_told() {
+        let table = "table\n0.10 1>0\n0.01 0>stop\nend\n";
+        // no model key: the stop on vertex 1 is a failure, not a classic 'explores'
+        let auto = handle(&format!("cmd exact\nk 2\ngraph 2 0 0-1\n{}", table));
+        assert!(auto.contains("\"model\":\"paper\"") && auto.contains("\"reason\":\"stopped_off_start\""), "{}", auto);
+        // asking for classic is still honoured: there the stop is only a stay and coverage wins
+        let classic = handle(&format!("cmd exact\nk 2\nmodel classic\ngraph 2 0 0-1\n{}", table));
+        assert!(classic.contains("\"model\":\"classic\"") && classic.contains("\"status\":\"explores\""), "{}", classic);
+        // a table without stop stays classic
+        let plain = handle("cmd exact\nk 2\ngraph 2 0 0-1\ntable\n0.10 1>0\n0.01 0>stay\nend\n");
+        assert!(plain.contains("\"model\":\"classic\""), "{}", plain);
+    }
+
+    #[test]
+    fn agen6_with_too_few_colours_is_an_error_not_a_silent_undefined() {
+        for k in 2..6 {
+            let out = handle(&format!("cmd exact\nk {}\ngraph 3 0 0-1,1-2\ndefault agen6\n", k));
+            assert!(out.contains("\"status\":\"error\"") && out.contains("6 colours"), "k {}: {}", k, out);
+        }
+        let ok = handle("cmd exact\nk 6\ngraph 3 0 0-1,1-2\ndefault agen6\n");
+        assert!(ok.contains("\"status\":\"explores\""), "{}", ok);
+    }
+
+    #[test]
+    fn play_reproduces_the_hand_traces_under_a_stated_adversary() {
+        // the traces of workbench/notes/agen6-hand-trace.xlsx, through the request protocol
+        let steps = |out: &str| -> Vec<(String, String)> {
+            // rows and actions in order, from the JSON of the trace
+            let mut v = Vec::new();
+            for chunk in out.split("{\"cur\":").skip(1) {
+                let row = chunk.split("\"row\":\"").nth(1).unwrap().split('"').next().unwrap().to_string();
+                let paint = chunk.split("\"paint\":").nth(1).unwrap().split(',').next().unwrap().to_string();
+                let target: i32 = chunk.split("\"target\":").nth(1).unwrap().split(',').next().unwrap().parse().unwrap();
+                let t = match target { -1 => "stay".to_string(), -2 => "stop".to_string(), c => c.to_string() };
+                v.push((row, format!("{}>{}", paint, t)));
+            }
+            v
+        };
+        let check = |graph: &str, prefer: &str, expected: &[(&str, &str)]| {
+            let out = handle(&format!("cmd play\nk 6\ngraph {}\ndefault agen6\nprefer {}\n", graph, prefer));
+            assert!(out.contains("\"status\":\"explores\"") && out.contains("\"model\":\"paper\""), "{}", out);
+            let got = steps(&out);
+            let want: Vec<(String, String)> = expected.iter().map(|(a, b)| (a.to_string(), b.to_string())).collect();
+            assert_eq!(got, want, "{}", graph);
+        };
+        check("3 0 0-1,1-2", "0 1 2", &PATH_TRACE);
+        check("3 0 0-1,1-2,0-2", "0 1 2", &TRIANGLE_TRACE);
+        check("4 0 0-1,0-2,1-3", "1 2 3 0", &TREE_TRACE);
+    }
+
+    #[test]
+    fn play_reports_failures_undefined_rows_and_unfinished_plays() {
+        let wrong = "table\n0.10 1>0\n0.01 0>stop\nend\n";
+        // stops on vertex 1
+        let out = handle(&format!("cmd play\nk 2\ngraph 2 0 0-1\n{}", wrong));
+        assert!(out.contains("\"status\":\"fails\"") && out.contains("\"reason\":\"stopped_off_start\"") && out.contains("\"stopped_at\":1"), "{}", out);
+        // no rule for the first row
+        let undef = handle("cmd play\nk 2\ngraph 2 0 0-1\ndefault none\n");
+        assert!(undef.contains("\"status\":\"undefined\""), "{}", undef);
+        // sigma* never stops: with a small budget the play is unfinished, with a large one it is caught repeating
+        let g = "graph 4 0 0-1,1-2,2-3";
+        let unf = handle(&format!("cmd play\nk 5\nmodel paper\n{}\ndefault sigma\nbudget 10\n", g));
+        assert!(unf.contains("\"status\":\"unfinished\""), "{}", unf);
+        let rep = handle(&format!("cmd play\nk 5\nmodel paper\n{}\ndefault sigma\nbudget 1000\n", g));
+        assert!(rep.contains("\"status\":\"fails\"") && rep.contains("\"reason\":\"never_stops\"") && !rep.contains("\"repeat_at\":null"), "{}", rep);
+        // a vertex outside the graph in `prefer` is an error
+        assert!(handle("cmd play\nk 6\ngraph 3 0 0-1,1-2\ndefault agen6\nprefer 0 7\n").contains("not in the graph"));
+        // and so is a token that is not a vertex number at all: it must not be dropped silently
+        for bad in ["1 two 0", "-1", "300", "1,2", "0x1"] {
+            let out = handle(&format!("cmd play\nk 6\ngraph 3 0 0-1,1-2\ndefault agen6\nprefer {}\n", bad));
+            assert!(out.contains("\"status\":\"error\"") && out.contains("is not a vertex number"), "prefer {}: {}", bad, out);
+        }
+        // a later prefer line replaces the earlier one
+        let two = handle("cmd play\nk 6\ngraph 4 0 0-1,0-2,1-3\ndefault agen6\nprefer 2 1 3 0\nprefer 1 2 3 0\n");
+        let one = handle("cmd play\nk 6\ngraph 4 0 0-1,0-2,1-3\ndefault agen6\nprefer 1 2 3 0\n");
+        assert_eq!(two, one);
+        // a preference for the other neighbour changes the order of a tie, not the outcome
+        let a = handle("cmd play\nk 6\ngraph 4 0 0-1,0-2,1-3\ndefault agen6\nprefer 1 2 3 0\n");
+        let b = handle("cmd play\nk 6\ngraph 4 0 0-1,0-2,1-3\ndefault agen6\nprefer 2 1 3 0\n");
+        assert!(a.contains("\"status\":\"explores\"") && b.contains("\"status\":\"explores\"") && a != b);
+    }
+
+    /// Deterministic small random connected graphs (fixed seed, xorshift): a random spanning tree plus
+    /// a few extra edges, so trees, cycles and denser graphs all appear.
+    fn random_connected_graphs(count: usize, seed: u64) -> Vec<(u8, String)> {
+        let mut x = seed;
+        let mut next = move |below: u64| -> u64 {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x % below
+        };
+        let mut graphs = Vec::new();
+        for _ in 0..count {
+            let n = 3 + next(10) as u8; // 3 to 12 vertices
+            let mut edges: Vec<(u8, u8)> = (1..n).map(|v| (next(v as u64) as u8, v)).collect();
+            for _ in 0..next(n as u64 + 5) {
+                let (a, b) = (next(n as u64) as u8, next(n as u64) as u8);
+                if a != b {
+                    edges.push((a.min(b), a.max(b)));
+                }
+            }
+            edges.sort();
+            edges.dedup();
+            graphs.push((n, edges.iter().map(|(a, b)| format!("{}-{}", a, b)).collect::<Vec<_>>().join(",")));
+        }
+        graphs
+    }
+
+    #[test]
+    fn agen6_explores_random_connected_graphs_from_every_start() {
+        // Definition 1 for many graphs: from every start vertex, against every adversary, every vertex
+        // is visited and the agent stops on the start.  (The paper proves it; this guards the code.)
+        let a6 = Rule { k: 6, table: Map::default(), default: Some(Formula::AGen6), terminating: true };
+        let mut pairs = 0;
+        for (n, edges) in random_connected_graphs(40, 0x9E37_79B9_7F4A_7C15) {
+            for start in 0..n {
+                let g = Graph::parse(&format!("{} {} {}", n, start, edges)).unwrap();
+                match exact_game(&g, &a6, 2_000_000) {
+                    Outcome::Explores { trace, .. } => {
+                        assert_eq!(trace.stopped_at, Some(start), "graph {} {} from {}", n, edges, start);
+                        assert_eq!(trace.unvisited, 0);
+                        assert_eq!(trace.steps.last().unwrap().act.target, STOP);
+                    }
+                    other => {
+                        let why = match other {
+                            Outcome::Fails { trace, .. } => format!("fails: {}", fail_reason(&trace)),
+                            Outcome::Overflow { positions } => format!("overflow after {} positions", positions),
+                            Outcome::Undefined { row, .. } => format!("undefined row {}", row.text(6)),
+                            _ => "another outcome".to_string(),
+                        };
+                        panic!("A_Gen6 must explore graph `{} {}` from vertex {} ({})", n, edges, start, why);
+                    }
+                }
+                pairs += 1;
+            }
+        }
+        assert!(pairs >= 200, "only {} (graph, start) pairs were checked", pairs);
+    }
+
+    #[test]
+    fn the_random_graph_check_can_fail() {
+        // negative control: sigma* never stops, so under the paper model the same graphs must be rejected
+        let sigma = Rule { k: 5, table: Map::default(), default: Formula::parse("sigma"), terminating: true };
+        let graphs = random_connected_graphs(5, 0x9E37_79B9_7F4A_7C15);
+        for (n, edges) in graphs {
+            let g = Graph::parse(&format!("{} 0 {}", n, edges)).unwrap();
+            assert!(matches!(exact_game(&g, &sigma, 2_000_000), Outcome::Fails { .. }), "graph {} {}", n, edges);
+        }
+        // and the generator yields connected graphs of the intended sizes, not the same one over and over
+        let many = random_connected_graphs(40, 0x9E37_79B9_7F4A_7C15);
+        assert!(many.iter().all(|(n, e)| Graph::parse(&format!("{} 0 {}", n, e)).is_ok()), "every generated graph is connected");
+        let sizes: std::collections::BTreeSet<u8> = many.iter().map(|(n, _)| *n).collect();
+        assert!(sizes.len() >= 6 && sizes.iter().any(|&n| n >= 10), "sizes {:?}", sizes);
+        assert!(many.iter().map(|(_, e)| e.clone()).collect::<std::collections::BTreeSet<_>>().len() >= 35);
+    }
+
+    #[test]
+    fn extra_tokens_on_a_table_line_or_after_the_edge_list_are_errors() {
+        // two rules on one line: the second used to be dropped, silently
+        let two = handle("cmd exact\nk 2\ngraph 2 0 0-1\ntable\n0.10 1>0 0.01 0>stop\nend\n");
+        assert!(two.contains("\"status\":\"error\"") && two.contains("bad table line: 0.10 1>0 0.01 0>stop"), "{}", two);
+        let stray = handle("cmd exact\nk 2\ngraph 2 0 0-1\ntable\n0.10 1>0 junk\nend\n");
+        assert!(stray.contains("bad table line"), "{}", stray);
+        // a spaced edge list used to explore a path instead of the triangle it was meant to be
+        let g = handle("cmd exact\nk 5\ngraph 3 0 0-1,1-2 0-2\ndefault sigma\n");
+        assert!(g.contains("\"status\":\"error\"") && g.contains("unexpected text after the edge list"), "{}", g);
+        assert!(Graph::parse("3 0 0-1,1-2 0-2").is_err());
+        // the plain forms still parse
+        assert!(Graph::parse("3 0 0-1,1-2,0-2").is_ok());
+        assert!(Graph::parse("1 0").is_ok());
+        assert!(handle("cmd exact\nk 2\ngraph 2 0 0-1\ntable\n0.10 1>0\n0.01 0>1\n1.10 1>stop\nend\n").contains("\"status\":\"explores\""));
+    }
+
+    const PATH_RULES: [u8; 17] = [3, 4, 2, 5, 7, 4, 2, 5, 7, 5, 8, 10, 5, 8, 10, 5, 9];
+    const TRIANGLE_RULES: [u8; 21] = [3, 4, 2, 5, 7, 4, 1, 5, 6, 11, 8, 10, 4, 2, 5, 7, 5, 8, 10, 5, 9];
+    const TREE_RULES: [u8; 24] = [3, 4, 2, 5, 7, 4, 2, 5, 7, 5, 8, 10, 5, 8, 10, 4, 2, 5, 7, 5, 8, 10, 5, 9];
+
+    #[test]
+    fn agen6_reports_the_rule_number_of_the_paper() {
+        // the rule numbers the hand traces record (the "Rule followed" column of the workbook), row by row
+        for (trace, rules) in [(&PATH_TRACE[..], &PATH_RULES[..]), (&TRIANGLE_TRACE[..], &TRIANGLE_RULES[..]), (&TREE_TRACE[..], &TREE_RULES[..])] {
+            for (i, ((row, _), want)) in trace.iter().zip(rules).enumerate() {
+                let row = Row::parse(row).unwrap();
+                assert_eq!(Formula::AGen6.rule_number(&row, 6), Some(*want), "step {} of a hand trace", i);
+            }
+        }
+        // no rule for fin, none for other formulas, none below six colours
+        assert_eq!(Formula::AGen6.rule_number(&Row::parse("2.000001").unwrap(), 6), None);
+        assert_eq!(Formula::parse("sigma").unwrap().rule_number(&Row::parse("0.10000").unwrap(), 5), None);
+        assert_eq!(Formula::AGen6.rule_number(&Row::parse("0.100000").unwrap(), 5), None);
+        // through the protocol: a default answer names its rule, a table row and other rules do not
+        let step = handle("cmd step\nk 6\ngraph 4 0 0-1,0-2,1-3\ncolours 3 0 0 0\ncur 0\nvis 0\ndefault agen6\n");
+        assert!(step.contains("\"row\":\"3.200000\"") && step.contains("\"source\":\"default\"") && step.contains("\"rule\":4"), "{}", step);
+        let ans = handle("cmd answer\nk 6\nrow 4.001000\ndefault agen6\n");
+        assert!(ans.contains("\"rule\":9"), "{}", ans);
+        let table = handle("cmd answer\nk 6\nrow 4.001000\ndefault agen6\ntable\n4.001000 2>stop\nend\n");
+        assert!(table.contains("\"source\":\"table\"") && !table.contains("\"rule\""), "{}", table);
+        assert!(!handle("cmd answer\nk 5\nrow 0.10000\ndefault sigma\n").contains("\"rule\""));
+    }
+
+    #[test]
+    fn a_vertex_can_be_repainted_to_the_initial_colour_without_forgetting_the_visit() {
+        // Section 5 of the paper: the agent may repaint a vertex from a later colour back to the initial one (colour 0).
+        // Colour 0 is also what a never-visited vertex looks like to the agent, but the visit is recorded apart from the
+        // colours, so exploring must still count that vertex.
+        let g = Graph::parse("2 0 0-1").unwrap();
+        let root = Pos { chi: 0, cur: 0, vis: 1, term: false };
+        // vertex 0 paints itself 1 and moves to its white neighbour; vertex 1 paints itself 2 and goes back (to colour 1) ...
+        let (_, at1) = successors(&g, &root, Action { paint: 1, target: 0 }, true)[0];
+        let (_, at0) = successors(&g, &at1, Action { paint: 2, target: 1 }, true)[0];
+        assert_eq!((at0.cur, colour(at0.chi, 0), colour(at0.chi, 1)), (0, 1, 2));
+        // ... and now vertex 0, colour 1, repaints itself to the INITIAL colour and moves on
+        let (_, after) = successors(&g, &at0, Action { paint: 0, target: 2 }, true)[0];
+        assert_eq!(colour(after.chi, 0), 0, "vertex 0 was colour 1 and is colour 0 again, as if untouched");
+        assert_eq!(after.vis, 0b11, "but both vertices are still recorded as visited");
+        // a table row may paint colour 0 from another colour, through the protocol, and is not rejected
+        let ans = handle("cmd answer\nk 3\nrow 1.100\ntable\n1.100 0>stay\nend\n");
+        assert!(ans.contains("\"paint\":0") && ans.contains("\"defined\":true"), "{}", ans);
+        // a rule that depends on the repaint: vertex 0 goes 0 -> 1 -> 0, and only then does its row say "stop"
+        let rows = [("0.100", "1>0"), ("0.010", "2>1"), ("1.001", "0>2"), ("2.100", "2>0"), ("0.001", "0>stop")];
+        let rule = paper_rule_from_table(3, &rows);
+        match exact_game(&g, &rule, 1000) {
+            Outcome::Explores { trace, .. } => assert_eq!((trace.steps.len(), trace.unvisited, trace.stopped_at), (5, 0, Some(0))),
+            _ => panic!("the repaint to the initial colour must let this rule stop on the start"),
+        }
+        // the same rule, stopping replaced by staying: distinguished from stop, the agent never terminates
+        let mut stay_rows = rows;
+        stay_rows[4] = ("0.001", "0>stay");
+        match exact_game(&g, &paper_rule_from_table(3, &stay_rows), 1000) {
+            Outcome::Fails { trace, .. } => assert_eq!((trace.stopped_at, trace.repeat_at.is_some()), (None, true)),
+            _ => panic!("stay is not stop: the agent never terminates"),
+        }
+    }
+
+    #[test]
+    fn stop_makes_a_terminal_position_only_in_the_paper_model() {
+        let g = Graph::parse("2 0 0-1").unwrap();
+        let p = Pos { chi: 0, cur: 0, vis: 1, term: false };
+        let stop = Action { paint: 2, target: STOP };
+        let paper = successors(&g, &p, stop, true);
+        assert_eq!(paper.len(), 1);
+        let (moved, q) = paper[0];
+        assert_eq!(moved, None);
+        assert!(q.term && q.cur == 0 && q.vis == 1);
+        assert_eq!(colour(q.chi, 0), 2, "the agent paints before it stops");
+        // classic: stop still means no move, and the agent goes on
+        assert!(!successors(&g, &p, stop, false)[0].1.term);
+        // a colour target with no neighbour of that colour stays put in both models
+        let absent = Action { paint: 1, target: 3 };
+        assert!(!successors(&g, &p, absent, true)[0].1.term);
+    }
+
+    #[test]
+    fn model_defaults_to_classic_and_agen6_implies_paper() {
+        assert_eq!(resolve_model("", &Formula::parse("sigma"), false), Ok(false));
+        assert_eq!(resolve_model("", &None, false), Ok(false));
+        assert_eq!(resolve_model("", &Formula::parse("agen6"), false), Ok(true));
+        assert_eq!(resolve_model("paper", &None, false), Ok(true));
+        assert_eq!(resolve_model("classic", &Formula::parse("agen6"), false), Ok(false));
+        assert!(resolve_model("nonsense", &None, false).is_err());
+        // a rule that can stop is judged by the paper model unless `classic` is asked for
+        assert_eq!(resolve_model("", &None, true), Ok(true));
+        assert_eq!(resolve_model("classic", &None, true), Ok(false));
+        assert!(handle("cmd answer
+k 6
+row 0.100000
+model nonsense
+").contains("unknown model"));
+        assert!(!handle("cmd answer
+k 6
+row 0.100000
+model paper
+default agen6
+").contains("error"));
     }
 
     #[test]

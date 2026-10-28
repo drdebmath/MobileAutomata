@@ -11,10 +11,13 @@ libraries or web fonts.
 
     sh workbench/build.sh          # needs: rustup target add wasm32-unknown-unknown
 
-produces `site/game.wasm` (~84 KB), and `site/standalone.html`, which inlines
-the engine (base64) so it opens from a `file://` URL.  `site/index.html` +
-`site/game.wasm` are for serving over HTTP (any static server, e.g.
-`python3 -m http.server` inside `site/`).
+produces `site/game.wasm` (~125 KB) and `../docs/index.html`, the same page with the engine inlined (base64),
+which opens from a `file://` URL and is what GitHub Pages serves (the build also writes `site/standalone.html`, an
+identical copy that is git-ignored, so a fresh clone has only `docs/index.html`).  `site/index.html` +
+`site/game.wasm` are for serving over HTTP (any static server, e.g. `python -m http.server 8000 --directory
+workbench/site`); the source page cannot be opened from disk.  Needs Rust 1.78 or newer with the `wasm32` target
+(Windows: also the Visual Studio C++ Build Tools), `sh` and `python3`; the `node testdata/check_*.mjs` scripts need Node 18
+or newer.
 
 ## What the page does
 
@@ -23,6 +26,47 @@ the engine (base64) so it opens from a `file://` URL.  `site/index.html` +
   (click; or double-click a vertex).  Keyboard `N E M D S`.  Up to 32
   vertices, degree at most 15.  Import/export as `n start u-v,u-v,...`, the
   `cegis` instance format; presets include the two hand-drawn sketches.
+* **Random graph.** The *random graph* box in the header takes a number of vertices (2 to 32) and a *family*, and *Generate*
+  (or Enter) replaces the canvas with a new random connected graph of that size and family.  The families are the
+  classes the algorithms of the papers are built for, each inside the next, so each algorithm is guaranteed on its
+  family and on every family above it (the menu names the first one):
+
+  | family | blocks of the graph | guaranteed for |
+  |---|---|---|
+  | simple cycle | one cycle (3 to 32 vertices) | A_TC3, A_C4, A_US5, A_Gen6 |
+  | tree | bridges only | A_TC3, A_C4, A_US5, A_Gen6 |
+  | cactus | bridges and cycles | A_C4, A_US5, A_Gen6 |
+  | cycle / K(p,q) blocks | bridges, cycles and complete bipartite K(p,q), p and q from 2 to 4 | A_C4, A_US5, A_Gen6 |
+  | clique / triangle-free blocks | bridges, cliques K3 to K5, cycles and triangle-free blocks with chords | A_US5, A_Gen6 |
+  | any connected graph | a random spanning tree plus up to n/2 extra edges | A_Gen6 |
+
+  The first five are built block by block: vertex 0, then blocks attached at random vertices until exactly n vertices are
+  placed.  No vertex gets more than 15 neighbours (the engine's limit); the start vertex is 0; the graph is laid out by a
+  spring layout so it can be read, inside the part of the canvas that the legend (top right) and the hint bar (bottom
+  left) do not cover (they are measured after the new graph is drawn, since that can change the size of the canvas box).
+  A random tree is drawn as a tree: the start vertex is the root at the top, its children are in a row below it, theirs
+  below that, every parent centred over its children (a star too wide for one row has every second leaf dropped a little;
+  a tree too deep for the canvas, more than about ten levels, is drawn by the springs like the other graphs).
+  "Any connected graph" is what the box gave before the families existed; it falls outside the A_US5 family often (about
+  one graph in five at 10 vertices, about half at 32), which is when A_US5 can fail on it.  The rule, the colours and the
+  rows in use are left alone.  A size outside the family's range (a cycle needs 3) is refused with a message and the
+  canvas stays as it was.  Replacing the whole graph (this option, a preset, Import) also clears the Analysis tab and
+  cancels a search still running, since a result belongs to the graph it was computed for.
+* **Two agents.** The *agents* box in the header chooses one agent or two.  Two agents see each other and run a built-in
+  rule, chosen in the Rules tab: **A_2x5** (the agents take turns, five colours: init, path, neigh, fin, head) or **A_2x4**
+  (the agents act together, four colours: init, head, path, fin; a colleague's eleven-rule sheet).  The number of colours is
+  set to the rule's; tables and code are for one agent (they are kept, and come back when you choose one agent again).  The
+  graph shows agent A (purple ring) and agent B (amber ring).  With A_2x5 the Play tab names the agent that acts at each step
+  (A works, B marks the head and follows) and the ledger tags rules T1 to T21; with A_2x4 one rule fires for the pair, both
+  agents act in the step (two ledger rows per step) and the ledger tags the sheet's cases R1 to R11 (R3a, R4c and so on).  The
+  Rules tab lists the rules.  *Search all executions* enumerates every choice of the adversary (with A_2x5 also which agent is
+  activated); the quick walks are not offered.  Presets: for A_2x5 the 17-step hand-trace path, the diamond (K4 minus an edge:
+  A_US5 alone fails on it, two agents do not), K4 and Sketch I; for A_2x4 the path, the triangle with two leaves, the diamond
+  and the wheel on five vertices.  See **Two agents** below.
+* **Play.** *Play* steps at the speed of the slider.  Its clock is a timer inside a Web Worker rather than a timer of the
+  page, and each tick does the steps that are due by the clock, so a play keeps its speed while you are in another tab
+  (a browser slows the timers of a page nobody is looking at; a tick that comes late catches up instead).  A hidden
+  tab does the steps but draws nothing until it is shown again.
 * **Rules.** A table of `own.bag -> paint>target` rows (the `rule_final.txt`
   format, importable), plus a default for rows the table does not list:
   nothing (the play stops at the first undefined row and asks for its action,
@@ -52,14 +96,284 @@ the engine (base64) so it opens from a `file://` URL.  `site/index.html` +
   three deterministic and N random adversary walks first, a cheap way to find
   a failure, never a proof of success.
 
+### The page in the paper model (A_Gen6, A_TC3, A_C4, A_US5)
+
+Choose one of the four algorithms of the papers under "answered by" (`A_Gen6 (paper model, k=6)`, `A_TC3 ... k=3`,
+`A_C4 ... k=4`, `A_US5 ... k=5`; choosing one raises a palette that is too small), load the template of the same name in
+the algorithm editor, or load one of the presets: the four `A_Gen6 ·` ones (the path, the triangle and the tree of the
+hand traces in `notes/agen6-hand-trace.xlsx`, and Sketch I), `A_TC3 ·` on a 5-cycle and a binary tree, `A_C4 ·` on the
+two graphs of Figure 2 of its paper (a bridge with a 4-cycle, and K3,2), and `A_US5 ·` on K4 and on K4 with a tail (a preset
+asks before it replaces rows or an algorithm in use).  Any rule that can `stop` (a table row whose target is `stop`) is
+played the same way.  Then:
+
+* the play does not end when the last vertex is reached: it ends when the agent stops (or a position repeats), and
+  the panel says what happened in the paper's terms: *Explores* (every vertex visited, stopped on the start vertex),
+  *Stopped early* (the unvisited vertices are named and ringed), *Stopped away from the start*, or *Never stops*;
+* three separate indicators show **coverage** (vertices visited), **return** (on, or stopped on, the start vertex)
+  and **termination** (running, stopped, never stops), live during the play;
+* the legend, the colour pickers and the ledger use the algorithm's own colour names (A_Gen6: init, path, fin, head1,
+  head2, neigh; A_TC3: init, l0, l1; A_C4: init, fin, front, path; A_US5: init, path, neigh, fin, head; a colour the
+  algorithm does not use is called unused), and the Play tab shows which rule answered the row just read, with a
+  one-line description; the ledger keeps the rule of each step, tagged as in the paper (r5 for A_Gen6, D5, C9, U2 for
+  the others);
+* the Analysis tab says what failed, from the engine's own reason (never stops, stopped early, stopped away from the
+  start) with the same three indicators, and a found execution can be replayed step by step;
+* the rules table and the define-row prompt offer `stop (paper model)` next to `stay`.
+* a hint next to the colours picker says how many colours the rule in use needs: the four algorithms of the papers
+  exactly six, three, four and five (shown in a warning colour, with the current number, when fewer are chosen, and
+  noting the unused ones when more), flipsweep4 and 4b, flipsweep5 and 5d, eat3 and chase3 at least 4, 5 and 3; rules
+  that work with any number have no hint.  The numbers are checked against the engine.
+
+The classic game keeps its own behaviour and wording.  `game-wasm/testdata/check_page_logic.mjs` compiles the script of
+both pages and holds the paper-model logic to the engine (for every paper-model fixture the page's verdict must equal
+the engine's reason and indicators); `check_page_play.mjs` runs the page's real script headlessly against the real
+engine and drives the Play tab (when a play ends, the banners and indicators, rule numbers, colour names, undo after a
+stop, replay) and the random graph button (every size from 2 to 32 gives a graph the engine accepts, on which A_Gen6
+survives the walks), checks the play clock (a late tick catches up, a hidden tab draws nothing, pause stops the clock),
+generates graphs of every family at several sizes and runs every algorithm guaranteed for the family on them (they must
+explore, and the algorithms with fewer colours must fail somewhere outside their family), and plays each of the three
+algorithms of the second paper twice, once chosen as the rule and once as
+the code of its template, which must give the same play step for step; `check_page_logic.mjs` also checks the generator
+(connected, no repeated edge, at most 15 neighbours, different graphs each time, the extremes of the randomness), that
+every graph of each family is in its family (by a separate block decomposition) and the families nest, that a tree is
+drawn as a tree (the root highest, every vertex below its parent, parents centred, nobody closer than 40, also for a star and
+a path), and that the layout puts no two vertices on top of each other, and that each template's colour constants and rule numbers
+agree with the page's colour names and rule descriptions; `check_wasm_parity.mjs` also requires every preset that
+brings one of the algorithms of the papers to explore.
+
+## Command line (`explore`)
+
+A native tool over the same engine, for scripts and for checking an algorithm without the page.  It builds
+the request of the protocol below and calls the same `handle` function the WebAssembly build exports, so a
+native run and a browser run answer identically.  From `game-wasm/`:
+
+    cargo run --bin explore -- exact --graph "4 0 0-1,0-2,1-3" --rule agen6 --summary
+    cargo run --bin explore -- play --graph "4 0 0-1,0-2,1-3" --rule agen6 --prefer "1 2 3 0"
+    cargo run --bin explore -- exact --preset sketch1 --rule sigma --cap 3000000 --summary
+    cargo run --bin explore -- walks --graph "3 0 0-1,1-2" --table rules.txt --k 3
+    cargo run --bin explore -- answer --rule agen6 --row 4.001000
+    cargo run --bin explore -- --help
+
+Commands: `exact` (every adversary), `walks`, `play` (one adversary, named by `--prefer`), `answer` (the
+action for one row).  The graph comes from `--graph "n s u-v,..."`, `--graph-file FILE` or `--preset sketch1`
+(edge pieces may be separated by spaces or line breaks).  The rule is `--rule NAME` (a formula such as `sigma` or
+`agen6`, `atc3`, `ac4`, `aus5`; each of the last four sets its own `--k`), `--table FILE` (rows `own.bag paint>target`, `#` comments), or both (table rows win).  Also `--k`
+(2 to 6), `--model classic|paper`, `--cap` (exact only, 1000 to 12000000), `--walks` (walks only, 0 to
+100000), `--budget` (walks and play, 10 to 5000000), `--prefer` (play only), `--row` (answer only): an option
+that does not belong to the command, or a value outside its range, is an error rather than being adjusted
+quietly.  Files may be UTF-8 with or without a byte order mark.  The JSON of the protocol is printed; `--summary`
+prints one line, `--request` prints the request instead of running it.
+
+Exit status: 0 explores, 1 fails, 2 undefined row, 3 overflow (raise `--cap`), 4 unrefuted (the walks found no
+failure: not a proof), 5 unfinished (`play` ran out of budget), 64 usage error or an error from the engine.
+`cargo test` in `game-wasm/` also runs the tool's tests (`tests/cli.rs`).  `build.sh` builds only the library
+for WebAssembly.
+
+Native and WebAssembly are held to the same answers by the fixtures in `game-wasm/testdata/fixtures` (protocol
+requests with their expected JSON): `cargo test` runs them natively, and after `sh build.sh`,
+`node game-wasm/testdata/check_wasm_parity.mjs` sends the same requests to `site/game.wasm` and also checks that
+`docs/index.html` embeds that build.  `node game-wasm/testdata/check_paper_templates.mjs` checks the page's template of each of the four
+algorithms against the engine's rule (action and rule number, for every row up to degree 4: 1,254, 102, 276 and 625 rows),
+`node game-wasm/testdata/check_page_logic.mjs` checks that the pages' scripts compile and their paper-model logic, and
+`node game-wasm/testdata/check_page_play.mjs` drives the Play tab headlessly.
+
 ## Protocol (for other front ends)
 
-`run` takes UTF-8 text lines `key value`: `cmd step|exact|walks|answer`,
+`run` takes UTF-8 text lines `key value`: `cmd step|exact|walks|play|answer`,
 `k`, `graph n s u-v,...`, `default NAME`, `cap`, `walks`, `budget`,
-`colours c0 c1 ...`, `cur v`, `vis v1 v2 ...`, `row own.bag`, and a block
-`table` … `end` of `row paint>target` lines.  It returns a `u32` little-endian
+`colours c0 c1 ...`, `cur v`, `vis v1 v2 ...`, `row own.bag`, `prefer v1 v2 ...`, `model
+classic|paper`, and a block `table` … `end` of `row paint>target` lines, where
+`target` is a colour number, `stay` (also `s`, `-`) or `stop`; the numbers 254
+and 255 are not colours and are rejected.  It returns a `u32` little-endian
 length followed by JSON: for `step` the row, its source, action, options and
 the automatic choice; for `exact`/`walks` `{status: explores|fails|undefined|
 overflow|unrefuted, positions, method, trace:{repeat_at, unvisited, steps:[{cur,
 row, paint, target, options, next}]}}`.  `cargo test` in `game-wasm/` checks
 the engine against the native `cegis` numbers on Sketch I.
+
+### One play under a named adversary (`cmd play`)
+
+`cmd play` runs a single execution and answers with its full trace, so a hand
+trace can be reproduced step by step.  The adversary chooses, whenever several
+neighbours carry the target colour, the one listed first in `prefer v1 v2 ...`
+(a vertex not listed comes last, the smaller number first; a vertex outside the
+graph is an error).  `budget` limits the number of steps (at least 10).  The
+answer is `explores` (the play won), `fails` (it stopped in the wrong place or
+repeated a position), `undefined` (no action for a row) or `unfinished` (the
+budget ran out before the play was decided).  It shows one adversary's play;
+only `exact` covers every adversary.
+
+### Paper model (`model paper`)
+
+The default `model classic` is the game above: the agent wins as soon as every
+vertex is visited, and `stop` would only mean "stay".  `model paper` is the
+model of Takahashi et al. (arXiv 2505.02789, Section 2): `stop` ends the run
+after painting the vertex, and the agent explores only if it stops **on the
+start vertex with every vertex visited**; a play that never stops, stops
+elsewhere, or stops before everything is visited is a failure.  With no
+`model` key the paper model is used whenever the rule can stop: `default`
+one of the algorithms of the papers (next section) or a table row answering
+`stop`.  A colour target that no neighbour has still leaves the agent in place
+in both models.
+
+Every `exact`/`walks` answer carries `"model"`, and each trace carries
+`stopped_at` (the vertex the agent stopped on, or null; a `stop` action is
+reported as target `-2`, `stay` as `-1`).  In the paper model an
+`explores`/`fails` answer also carries `indicators` `{visited_all, stopped,
+stopped_at_start}` and a failure a `reason`: `never_stops`, `stopped_early`
+or `stopped_off_start`.
+
+### The algorithms of the papers (`default NAME`)
+
+Four rules are built in as named formulas.  Each is one rule function of the model of the papers, with the paper's
+own rule numbers (an answer for a row carries `"rule": N`, and the page and the ledger show it).
+
+| name | from | colours (numbers) | explores | moves |
+|---|---|---|---|---|
+| `agen6` | Takahashi et al., arXiv 2505.02789, Algorithm 2 | 6: 0 init, 1 path, 2 fin, 3 head1, 4 head2, 5 neigh | every graph | |
+| `atc3` | Hiraoka, Imori, Takahashi, Sudo, arXiv 2609.14356, Algorithm 1 (rules D1-D11) | 3: 0 init, 1 l0, 2 l1 | every tree and every simple cycle | O(n) |
+| `ac4` | same paper, Algorithm 2 (rules C1-C14) | 4: 0 init, 1 fin, 2 front, 3 path | graphs whose blocks are cycles or complete bipartite graphs (all cacti) | O(n) |
+| `aus5` | same paper, Algorithm 3 (rules U1-U19) | 5: 0 init, 1 path, 2 neigh, 3 fin, 4 head | graphs whose blocks are cliques or triangle-free (all unichord-free graphs) | O(nΔ) |
+
+The paper model is chosen for them without being asked.  Fewer colours than an algorithm needs is an error
+(`atc3 needs 3 colours (k 3)`); more are left unused.  Where the paper gives no output the row is undefined: a `fin`
+vertex (the agent is never on one: no rule requests `fin`), and the observations the papers prove unreachable, such as
+an `l0` vertex seeing only `init` neighbours in A_TC3.  `stay` and `stop` are the engine's `stay` and `stop` targets.
+
+How the transcription of the second paper is checked (`src/paper_tests.rs`, run by `cargo test`): every rule on a row
+derived by hand; the two traces of Figure 2 of the paper for A_C4, whose rule sequences the figure prints; every
+connected graph of up to seven vertices, up to isomorphism, from every start vertex and against every adversary
+(167, 776 and 1,117 graph-and-start pairs in the three classes, all explored); a scan of every reachable position for
+an undefined row or a request for a colour no neighbour has, which the paper counts as a failure but the engine would
+turn into a stay (none occurs); failures outside the classes (A_TC3 fails on a triangle with a pendant vertex, as
+Theorem 13 of the paper requires of any three-colour rule; A_US5 on the diamond, A_C4 on K4).
+
+## Two agents (`agents 2`)
+
+A second agent changes what a rule can do, so it is a separate model, with separate rules: **A_2x5** (the agents take turns)
+and **A_2x4** (the agents act together; it differs from the model below in the scheduler only, see its own section).  These
+are assumptions of this workbench, not a published model (the papers above are about one agent).  The model of A_2x5:
+
+* Two identical oblivious agents start together on the start vertex; every vertex starts in colour 0.
+* An agent sees its vertex colour, whether the other agent is on that vertex, and for every neighbour its colour and whether
+  the other agent is on it.  It may ask to move to a neighbour of a colour, to the neighbour that holds the other agent
+  (its *partner*), to stay, to stop, or to wait.
+* The scheduler is sequential and fair: the adversary activates one agent per step and picks the destination among equal
+  candidates.  An agent whose rule says *wait* has nothing to do, so a fair scheduler cannot starve the other.  Agents on the
+  same vertex see the same row and act the same way, so then only agent 0 is stepped (the other choice is the mirror image);
+  agent 0 is therefore the one that works and agent 1 the one that waits and follows.
+* The agents explore when every vertex is visited and **both** have stopped on the start vertex.
+
+Why the model matters: if the adversary may activate both identical agents at once (fully or semi-synchronous), it can send
+them to the same neighbour every time, so the pair behaves as one agent and any lower bound for one agent holds for the
+pair.  What the second agent buys here is the ability to see where the other is.
+
+### The algorithm A_2x5 (`default a2c5`)
+
+The semi-DFS of A_US5 and A_Gen6 (an induced path, a head, a finished set) with the five colours of A_US5: 0 init, 1 path,
+2 neigh, 3 fin, 4 head.  A probe that is accepted turns its vertex into a second head, and a rejected neighbour cleaning
+itself up may touch both heads; one colour cannot say which to return to, but the agent can go back to *its partner*, which
+stands on the old head.  A finished head is painted fin before the cleanup, which flags the backtrack (A_US5 recolours the
+predecessor for that).  The 21 rules, T1 to T21, are in `game-wasm/src/two.rs` (and in the page's Rules tab); a row is
+`own.bag@p`, with `p` = `h` (the other agent is on this vertex), the colour digit of the neighbour holding it, or `-`
+(not next door), for example `4.11001@h`.
+
+How it is checked (`cargo test`): every rule on a row written out by hand; the hand trace of the path 0-1-2 (17 steps,
+rule and agent at each step); every connected graph of up to six vertices from every start vertex against every adversary
+(and up to seven with `cargo test --release -- --ignored`), with the number of positions the exact game enumerates equal to
+the totals of an independent implementation of this model (20, 180, 1,832, 20,226, 300,870, and 6,157,922 for seven vertices);
+the diamond, which one agent running A_US5 fails and two agents explore; and a scan of every reachable position for a request
+for a colour nobody has or a partner who is not next door (none occurs).  The independent implementation (not in this
+repository) also covered all 11,117 connected graphs of eight vertices (88,936 graph-start pairs), and found that the same
+rules fail if the return to the partner is replaced by a request for a colour.  This is exhaustive up to eight vertices, not
+a proof for all graphs.  The fixtures `two_*.req` hold the same answers natively and in WebAssembly; `check_page_play.mjs`
+plays the 17-step trace, the diamond (including a replay of the engine's longest execution) and random graphs of four
+families up to 20 vertices through the real page script with two agents.
+
+### The algorithm A_2x4 (`default a2c4`)
+
+A four-colour strategy for two agents that **act together**, from a colleague's rule sheet (not from a paper).  The model is
+the one above except for the scheduler: the agents see each other, a rule reads **both** agents' views, one rule fires for
+the pair and both agents act in that step; the adversary only chooses where a move to a colour goes.  (This is the
+model in which the agents can communicate; it is not the adversarial turn-taking of A_2x5.)  The agents are identical; the
+page names them A and B, and when they stand together A plays the first role of a rule.  Colours: 0 init (I), 1 head or
+candidate (H), 2 path (P), 3 fin (F); the page draws init white, head amber, path **red** and fin **green** for this rule (the
+other rules keep the palette by colour number).
+
+A rule is *both agents on a vertex of colour c* (a condition on the colours of the neighbours of that vertex) or *the agents
+on adjacent vertices of colours c and d* (a condition on the neighbours of each vertex, the partner's own vertex left out).  A
+condition is *some neighbour has colour c* or *no neighbour has any of these colours*.  An action is: paint the vertex and
+stay, move to a neighbour of a colour without painting, paint and move onto the partner, move onto the partner without
+painting, or paint fin and terminate (both agents stop).  The first rule that matches fires: **rule 11 first**, then 1 to 10,
+and inside a numbered rule the cases a, b, c in the order written.  The engine numbers the 19 cases 1 to 19 in the order of
+the sheet and the page tags them with the sheet's names:
+
+| case | when | then |
+|---|---|---|
+| R1 | both on an I vertex | one paints it H and stays, the other moves to an I neighbour |
+| R2 | H and I side by side | the H agent stays, the I agent paints its vertex H and moves onto its partner |
+| R3a | both on an H vertex with an H neighbour | one paints it P and stays, the other moves to an H neighbour |
+| R3b | both on an H vertex, no H neighbour, an I neighbour | one stays, the other moves to an I neighbour |
+| R3c | both on an H vertex, no H and no I neighbour | both paint it P |
+| R4a | P and H side by side, no other I around the H vertex | the H vertex becomes F |
+| R4b | P and H side by side, another P around the H vertex | the H agent moves onto its partner, the H vertex stays H |
+| R4c | P and H side by side, no other P around the H vertex | the P agent moves onto its partner |
+| R5a | both on a P vertex with an I neighbour | one stays, the other moves to an I neighbour |
+| R5b | both on a P vertex, no I neighbour | one paints it F and stays, the other moves to a P neighbour |
+| R6a | P and I side by side, no other I around the I vertex | the I vertex becomes F |
+| R6b | P and I side by side, another P around the I vertex | the I vertex becomes H, its agent moves onto its partner |
+| R6c | P and I side by side, no other P around the I vertex | the I vertex becomes H, its agent stays |
+| R7 | P and F side by side | the P vertex becomes F and the F vertex becomes I |
+| R8 | F and I side by side | the I vertex becomes F and its agent moves onto its partner |
+| R9a | both on an F vertex with an H neighbour | one stays, the other moves to an H neighbour |
+| R9b | both on an F vertex, no H neighbour | both paint it H |
+| R10 | F and H side by side | the H vertex becomes I and its agent moves onto its partner |
+| R11 | both on a vertex, no I, H or P neighbour | both paint it F and terminate |
+
+How it was read, since the sheet is handwritten: the cases of a rule are tried in the order written (a before b before c);
+the conditions of rule 2 were scribbled out on the sheet and are taken as removed; "[Any | …]" puts the condition on the
+second agent's vertex; a move to a colour nobody has cannot be done, and the pair is then stuck (the rules never ask for it).
+R7 is as written: it makes the finished vertex I again, and R8 makes it F once more, so the two together act as a backtrack.
+Two readings matter: without rule 11 first the rules fail already on a path of two vertices (R5b has no P neighbour to go
+to), and if the partner's own vertex were counted in the conditions they would fail on a path of three vertices.
+
+How it is checked (`cargo test`, `joint.rs` and `joint_tests.rs`): one position written out by hand for every one of the 19
+cases (the rule that fires, both roles' actions and what the adversary picks from); rule 11 before rule 1 on a single vertex;
+the hand trace of the path 0-1-2 (16 steps, case at each step); the diamond from a tip, which the older 21-rule sheet got
+stuck on; every connected graph of up to six vertices from every start vertex against every adversary (and up to seven with
+`cargo test --release -- --ignored`), with the number of positions of the exact game, forgetting which agent is which, equal
+to the totals of an independent implementation written from the sheet (14, 148, 1,578, 17,638, 278,128, and 6,267,980 for
+seven vertices); and a scan of every reachable position of a few graphs for a position with no rule or an impossible move
+(none occurs).  Outside this repository the same rules were also run on all 11,117 connected graphs of eight vertices from
+every start, about 560,000 random graphs of 9 to 12 vertices, thousands of random graphs of 13 to 30 vertices, large
+symmetric families (cliques to K16, stars, complete bipartite and multipartite graphs, cubes, Petersen, grids, trees, long
+paths and cycles) and random blow-ups; none failed, but runs on the largest dense graphs were too big to finish.  This is
+exhaustive up to eight vertices, not a proof for all graphs.  The fixtures `joint_*.req` hold the same answers natively and in
+WebAssembly; `check_page_play.mjs` plays the 16-step trace, an adversary's click, undo, a replay of the engine's longest
+execution and random graphs of four families up to 20 vertices through the real page script with A_2x4.
+
+### In the protocol and the command line
+
+Keys: `agents 2`, `default a2c5` or `default a2c4` (required), `k` of at least 5 (a2c5) or 4 (a2c4).  A table, `model classic`
+and `cmd walks` are errors.  For `default a2c4` the answers differ as follows: `cmd step` answers
+`{"joint":true,"step":{…},"choose":[…],"auto":…,"rule":n,"tag":"R4c",…}`, where `step` has the keys of one agent's step for the
+first role (the agent that stands on the first vertex of the rule, with `agent`, `cur`, `other`, `row`, `paint`, `target`,
+`options`, `next` and `rule`) and the second role under `second`, `paints:false` marks a role that only moves, and `choose` is
+what the adversary picks from (the role that moves to a colour); `exact` and `play` carry the same `second` in every trace step;
+`cmd answer` is refused, since a rule reads both agents' views.  The rest of this section is for a2c5.
+`cmd step` takes `colours`, `cur` (agent A), `cur2` (agent B), `term t1 t2` (1 = that agent has stopped) and `vis`, and
+answers with the agent that acts (`agent`: 0 or 1, agent 0 when both could), `row`, `rule`, `paint`, `target` and `options`;
+a partner move lists the partner's vertex as its one option, `target` -4 means partner, -3 wait (never returned by `step`),
+-1 stay, -2 stop; `{"over":true}` when both have stopped and `{"stuck":true}` when neither can act.  `exact` and `play`
+answer as for one agent, plus `"agents":2`, with every trace step carrying `agent`, `cur`, `other` and `rule`; a failure
+carries a `reason` as before or `stuck`.  `cmd answer` takes `row own.bag@p`.
+
+    cargo run --bin explore -- exact --agents 2 --graph "4 2 0-1,0-2,0-3,1-2,1-3" --summary
+    cargo run --bin explore -- play --agents 2 --graph "3 0 0-1,1-2" --prefer "1 2 0"
+    cargo run --bin explore -- answer --agents 2 --row 4.11001@h
+
+`--agents 2` takes `a2c5` as the rule and five colours by itself, or `--rule a2c4` (four colours); a table, a `--rule` other than
+these two and the `walks` command are refused, and so is `--rule a2c5` or `--rule a2c4` without `--agents 2`:
+
+    cargo run --bin explore -- exact --agents 2 --rule a2c4 --graph "4 2 0-1,0-2,0-3,1-2,1-3" --summary
+
